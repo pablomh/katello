@@ -154,6 +154,12 @@ module Katello
         URI.parse(self.url).host != self.registration_host
       end
 
+      def lb_backend_hostnames
+        return [] unless load_balanced?
+        self.class.behind_load_balancer(registration_host)
+                   .map { |proxy| URI.parse(proxy.url).host }
+      end
+
       def update_content_counts!(environment: nil, content_view: nil, repository: nil)
         if environment.nil? && content_view.nil? && repository.nil?
           global_content_counts
