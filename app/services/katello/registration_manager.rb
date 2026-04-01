@@ -197,11 +197,7 @@ module Katello
       # rubocop:enable Metrics/MethodLength
 
       def check_registration_services
-        ping_results = {}
-        User.as_anonymous_admin do
-          ping_results = Katello::Ping.ping
-        end
-        ping_results[:services][:candlepin][:status] == "ok"
+        Katello::Resources::Candlepin::CandlepinPing.ok?(cached: true)
       end
 
       private

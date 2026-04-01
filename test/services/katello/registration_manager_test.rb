@@ -489,5 +489,17 @@ module Katello
         end
       end
     end
+
+    class CheckRegistrationServicesTest < ActiveSupport::TestCase
+      def test_delegates_to_candlepin_ping
+        Katello::Resources::Candlepin::CandlepinPing.expects(:ok?).returns(true)
+        assert Katello::RegistrationManager.check_registration_services
+      end
+
+      def test_returns_false_when_candlepin_not_ok
+        Katello::Resources::Candlepin::CandlepinPing.expects(:ok?).returns(false)
+        refute Katello::RegistrationManager.check_registration_services
+      end
+    end
   end
 end
