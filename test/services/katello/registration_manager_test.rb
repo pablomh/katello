@@ -488,6 +488,30 @@ module Katello
           ::Katello::RegistrationManager.register_host(@host, rhsm_params, [@content_view_environment])
         end
       end
+
+      def test_register_host_logs_consumer_created_structured_line
+        uuid = 'abcd1234-abcd-1234-abcd-abcd12345678'
+        # Stub everything register_host needs beyond Candlepin consumer creation
+        ::Katello::RegistrationManager.expects(:get_uuid).returns(uuid)
+        ::Katello::Resources::Candlepin::Consumer.expects(:create).returns(uuid: uuid)
+        ::Katello::Resources::Candlepin::Consumer.expects(:get).returns({})
+        ::Katello::Host::SubscriptionFacet.any_instance.stubs(:update_hypervisor)
+        ::Katello::Host::SubscriptionFacet.any_instance.stubs(:update_guests)
+        ::Host::Managed.any_instance.stubs(:refresh_statuses)
+
+        reg_logger = mock('registration_logger')
+        # Allow any INFO calls (e.g. fact assignment); assert specifically on consumer_created
+        reg_logger.stubs(:info)
+        reg_logger.expects(:info).with { |msg|
+          msg.include?('consumer_created') &&
+            msg.include?("uuid=#{uuid}") &&
+            msg.include?('candlepin_ms=') &&
+            msg.include?('total_ms=')
+        }.at_least_once
+        Foreman::Logging.stubs(:logger).with('registration').returns(reg_logger)
+
+        ::Katello::RegistrationManager.register_host(@host, rhsm_params, [@content_view_environment])
+      end
     end
   end
 end

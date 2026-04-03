@@ -490,5 +490,18 @@ module Katello
         assert_equal 'foreman.example.com', @controller.get_parent_host(nil_host)
       end
     end
+
+    describe "consumer UUID in logging MDC" do
+      it "sets consumer_uuid in MDC for requests with a valid UUID :id param" do
+        uuid = @host.subscription_facet.uuid
+        put :facts, params: { :id => uuid, :facts => {} }
+        assert_equal uuid, ::Logging.mdc['consumer_uuid']
+      end
+
+      it "does not set consumer_uuid in MDC when :id is not a UUID" do
+        put :facts, params: { :id => 'not-a-uuid', :facts => {} }
+        assert_nil ::Logging.mdc['consumer_uuid']
+      end
+    end
   end
 end
