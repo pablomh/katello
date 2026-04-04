@@ -227,12 +227,30 @@ module Katello
         destroy_host_record(host.id)
       end
 
+      # Network-level failures reaching Candlepin (connection refused, timeout,
+      # DNS error) — as opposed to Candlepin returning an application-level
+      # error (4xx/5xx). The distinction matters: network failures are transient
+      # and the client should retry; Candlepin errors may be permanent.
+      CANDLEPIN_NETWORK_ERRORS = [
+        Errno::ECONNREFUSED,
+        Errno::ETIMEDOUT,
+        Errno::EHOSTUNREACH,
+        SocketError,
+        RestClient::RequestTimeout,
+        RestClient::ServerBrokeConnection,
+      ].freeze
+
       def create_in_candlepin(host, content_view_environments, consumer_params, activation_keys)
         t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
         # if CP fails, nothing to clean up yet w.r.t. backend services
         t_cp = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        cp_create = ::Katello::Resources::Candlepin::Consumer.create(content_view_environments.map(&:cp_id), consumer_params, activation_keys.map(&:cp_name), host.organization)
+        begin
+          cp_create = ::Katello::Resources::Candlepin::Consumer.create(content_view_environments.map(&:cp_id), consumer_params, activation_keys.map(&:cp_name), host.organization)
+        rescue *CANDLEPIN_NETWORK_ERRORS => e
+          raise Katello::Errors::RegistrationServiceUnavailableError,
+                _("Candlepin is temporarily unreachable: %s") % e.message
+        end
         candlepin_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t_cp) * 1000).to_i
 
         fact_count = consumer_params[:facts]&.size || 0

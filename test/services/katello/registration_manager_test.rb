@@ -512,6 +512,16 @@ module Katello
 
         ::Katello::RegistrationManager.register_host(@host, rhsm_params, [@content_view_environment])
       end
+
+      def test_candlepin_network_errors_are_wrapped_as_service_unavailable
+        ::Katello::RegistrationManager::CANDLEPIN_NETWORK_ERRORS.each do |error_class|
+          ::Katello::Resources::Candlepin::Consumer.stubs(:create).raises(error_class)
+          assert_raises(Katello::Errors::RegistrationServiceUnavailableError) do
+            ::Katello::RegistrationManager.send(:create_in_candlepin,
+                                                @host, [@content_view_environment], rhsm_params, [])
+          end
+        end
+      end
     end
   end
 end

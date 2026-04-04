@@ -53,6 +53,20 @@ module Katello
       end
     end
 
+    # Both errors indicate the server is temporarily unable to serve the
+    # request due to resource exhaustion, not a client error. Return 503 so
+    # subscription-manager and the orchestration layer know to back off.
+    rescue_from Katello::Errors::RegistrationServiceUnavailableError,
+                ActiveRecord::ConnectionTimeoutError do |e|
+      Rails.logger.warn("Registration service unavailable (#{e.class}): #{e.message}")
+      response.headers['Retry-After'] = '30'
+      if request_from_katello_cli?
+        render json: { errors: [e.message] }, status: :service_unavailable
+      else
+        render plain: e.message, status: :service_unavailable
+      end
+    end
+
     rescue_from RestClient::Exception do |e|
       Rails.logger.error(pp_exception(e, with_backtrace: false))
       Rails.logger.error(e.backtrace.detect { |line| line.match("katello.*controller") })

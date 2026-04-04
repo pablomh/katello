@@ -503,5 +503,25 @@ module Katello
         assert_nil ::Logging.mdc['consumer_uuid']
       end
     end
+
+    describe "honest 503 responses on resource exhaustion" do
+      it "returns 503 with Retry-After when Candlepin is unreachable during registration" do
+        ::Katello::RegistrationManager.stubs(:process_registration).raises(
+          Katello::Errors::RegistrationServiceUnavailableError, "Candlepin is temporarily unreachable"
+        )
+        post :consumer_create, params: { owner: @organization.label }
+        assert_equal 503, response.status
+        assert_equal '30', response.headers['Retry-After']
+      end
+
+      it "returns 503 with Retry-After when the database connection pool is exhausted" do
+        ::Katello::RegistrationManager.stubs(:process_registration).raises(
+          ActiveRecord::ConnectionTimeoutError, "could not obtain a connection from the pool"
+        )
+        post :consumer_create, params: { owner: @organization.label }
+        assert_equal 503, response.status
+        assert_equal '30', response.headers['Retry-After']
+      end
+    end
   end
 end
