@@ -10,6 +10,12 @@ module Katello
 
     class RegistrationError < StandardError; end
 
+    # Raised when a registration attempt fails because a required backend
+    # service (Candlepin, database connection pool) is temporarily unavailable.
+    # Controllers rescue this and return HTTP 503 + Retry-After so that
+    # subscription-manager and the orchestration layer can back off and retry.
+    class RegistrationServiceUnavailableError < StandardError; end
+
     class InvalidRepositoryTypeError < StandardError; end
 
     class MultiEnvironmentNotSupportedError < StandardError; end

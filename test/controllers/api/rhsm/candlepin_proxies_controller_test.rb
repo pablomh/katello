@@ -490,5 +490,38 @@ module Katello
         assert_equal 'foreman.example.com', @controller.get_parent_host(nil_host)
       end
     end
+
+    describe "consumer UUID in logging MDC" do
+      it "sets consumer_uuid in MDC for requests with a valid UUID :id param" do
+        uuid = @host.subscription_facet.uuid
+        put :facts, params: { :id => uuid, :facts => {} }
+        assert_equal uuid, ::Logging.mdc['consumer_uuid']
+      end
+
+      it "does not set consumer_uuid in MDC when :id is not a UUID" do
+        put :facts, params: { :id => 'not-a-uuid', :facts => {} }
+        assert_nil ::Logging.mdc['consumer_uuid']
+      end
+    end
+
+    describe "honest 503 responses on resource exhaustion" do
+      it "returns 503 with Retry-After when Candlepin is unreachable during registration" do
+        ::Katello::RegistrationManager.stubs(:process_registration).raises(
+          Katello::Errors::RegistrationServiceUnavailableError, "Candlepin is temporarily unreachable"
+        )
+        post :consumer_create, params: { owner: @organization.label }
+        assert_equal 503, response.status
+        assert_equal '30', response.headers['Retry-After']
+      end
+
+      it "returns 503 with Retry-After when the database connection pool is exhausted" do
+        ::Katello::RegistrationManager.stubs(:process_registration).raises(
+          ActiveRecord::ConnectionTimeoutError, "could not obtain a connection from the pool"
+        )
+        post :consumer_create, params: { owner: @organization.label }
+        assert_equal 503, response.status
+        assert_equal '30', response.headers['Retry-After']
+      end
+    end
   end
 end

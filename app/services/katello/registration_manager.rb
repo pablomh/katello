@@ -227,16 +227,49 @@ module Katello
         destroy_host_record(host.id)
       end
 
+      # Network-level failures reaching Candlepin (connection refused, timeout,
+      # DNS error) — as opposed to Candlepin returning an application-level
+      # error (4xx/5xx). The distinction matters: network failures are transient
+      # and the client should retry; Candlepin errors may be permanent.
+      CANDLEPIN_NETWORK_ERRORS = [
+        Errno::ECONNREFUSED,
+        Errno::ETIMEDOUT,
+        Errno::EHOSTUNREACH,
+        SocketError,
+        RestClient::RequestTimeout,
+        RestClient::ServerBrokeConnection,
+      ].freeze
+
       def create_in_candlepin(host, content_view_environments, consumer_params, activation_keys)
+        t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
         # if CP fails, nothing to clean up yet w.r.t. backend services
-        cp_create = ::Katello::Resources::Candlepin::Consumer.create(content_view_environments.map(&:cp_id), consumer_params, activation_keys.map(&:cp_name), host.organization)
+        t_cp = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        begin
+          cp_create = ::Katello::Resources::Candlepin::Consumer.create(content_view_environments.map(&:cp_id), consumer_params, activation_keys.map(&:cp_name), host.organization)
+        rescue *CANDLEPIN_NETWORK_ERRORS => e
+          raise Katello::Errors::RegistrationServiceUnavailableError,
+                _("Candlepin is temporarily unreachable: %s") % e.message
+        end
+        candlepin_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t_cp) * 1000).to_i
+
+        fact_count = consumer_params[:facts]&.size || 0
+        t_facts = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         ::Katello::Host::SubscriptionFacet.update_facts(host, consumer_params[:facts]) unless consumer_params[:facts].blank?
+        fact_import_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t_facts) * 1000).to_i
+
         uuid = cp_create[:uuid]
         if uuid.present? && uuid != host.subscription_facet.uuid
           Rails.logger.info(_("Candlepin returned different consumer uuid than requested (%s), updating uuid in subscription_facet.") % uuid)
           host.subscription_facet.uuid = uuid
           host.subscription_facet.save!
         end
+
+        total_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).to_i
+        ::Foreman::Logging.logger('registration').info(
+          "consumer_created uuid=#{uuid} host=#{host.name} candlepin_ms=#{candlepin_ms} fact_count=#{fact_count} fact_import_ms=#{fact_import_ms} total_ms=#{total_ms}"
+        )
+
         uuid
       end
 

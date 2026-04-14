@@ -21,6 +21,10 @@ module Katello
                                                :enabled_repos, :available_releases]
 
     before_action :check_registration_services, :only => [:consumer_create, :consumer_destroy, :consumer_activate]
+    before_action :set_consumer_uuid_mdc, :only => [:consumer_show, :consumer_destroy, :consumer_checkin,
+                                                    :enabled_repos, :regenerate_identity_certificates,
+                                                    :facts, :available_releases, :upload_tracer_profile,
+                                                    :get, :post, :put, :delete]
 
     before_action :add_candlepin_version_header
 
@@ -46,6 +50,20 @@ module Katello
         rescue JSON::ParserError
           # Not a json response, leave as-is
         end
+      end
+    end
+
+    # Both errors indicate the server is temporarily unable to serve the
+    # request due to resource exhaustion, not a client error. Return 503 so
+    # subscription-manager and the orchestration layer know to back off.
+    rescue_from Katello::Errors::RegistrationServiceUnavailableError,
+                ActiveRecord::ConnectionTimeoutError do |e|
+      Rails.logger.warn("Registration service unavailable (#{e.class}): #{e.message}")
+      response.headers['Retry-After'] = '30'
+      if request_from_katello_cli?
+        render json: { errors: [e.message] }, status: :service_unavailable
+      else
+        render plain: e.message, status: :service_unavailable
       end
     end
 
@@ -452,6 +470,13 @@ module Katello
 
     def logger
       ::Foreman::Logging.logger('katello/cp_proxy')
+    end
+
+    # Set consumer UUID in the logging MDC so all log lines within this request
+    # automatically include consumer_uuid=<uuid> without touching individual calls.
+    def set_consumer_uuid_mdc
+      uuid = params[:id].to_s
+      ::Logging.mdc['consumer_uuid'] = uuid if uuid.match?(/\A[0-9a-f\-]{36}\z/)
     end
 
     def respond_for_index(options = {})
