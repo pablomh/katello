@@ -73,6 +73,14 @@ module Katello
     end
 
     def get
+      # Serve cacheable Candlepin proxy responses from Rails cache to reduce
+      # Tomcat thread contention during concurrent registration.
+      cached = serve_from_proxy_cache
+      if cached
+        render :json => cached[0], :status => cached[1]
+        return
+      end
+
       extra_headers = {}
       modified_since = request.headers[IF_MODIFIED_SINCE_HEADER]
       if modified_since.present?
@@ -282,7 +290,11 @@ module Katello
     def serials
       @host.subscription_facet.last_checkin = Time.now
       @host.subscription_facet.save!
-      render :json => Katello::Resources::Candlepin::Consumer.serials(@host.subscription_facet.uuid)
+      uuid = @host.subscription_facet.uuid
+      result = Rails.cache.fetch("katello/proxy/cert_serials/#{uuid}", expires_in: 1.minute) do
+        Katello::Resources::Candlepin::Consumer.serials(uuid)
+      end
+      render :json => result
     end
 
     def get_parent_host(headers)
@@ -311,6 +323,45 @@ module Katello
         [JSON.parse(r.body), r.code]
       end
       ::Foreman::Logging.logger('registration').debug "compliance cache=HIT uuid=#{id}" unless cache_miss
+      result
+    end
+
+    # Cache proxy responses for Candlepin endpoints that return predictable
+    # data during registration. Reduces Candlepin calls from ~22 to ~10 per
+    # registration, freeing Tomcat threads for consumer creation.
+    #
+    # Returns [body, status_code] on cache hit, nil on miss (falls through
+    # to the normal proxy path).
+    def serve_from_proxy_cache
+      case @request_path
+      when %r{/consumers/[^/]+/accessible_content}
+        # Same for all hosts in the same org — cache per org.
+        org_id = @host&.organization_id
+        cache_proxy_get("accessible_content/#{org_id}", 5.minutes) if org_id
+      when %r{/consumers/([^/]+)/content_overrides\z}
+        # Per-consumer, but empty for new consumers.
+        cache_proxy_get("content_overrides/#{Regexp.last_match(1)}", 1.minute)
+      when %r{/consumers/([^/]+)/release\z}
+        # Per-consumer preferred release.
+        cache_proxy_get("release/#{Regexp.last_match(1)}", 1.minute)
+      when %r{/consumers/[^/]+/owner\z}
+        # Identical for all hosts in the same org.
+        org_id = @host&.organization_id
+        cache_proxy_get("owner/#{org_id}", 5.minutes) if org_id
+      end
+    end
+
+    def cache_proxy_get(cache_key, ttl)
+      full_key = "katello/proxy/#{cache_key}"
+      cache_miss = false
+      result = Rails.cache.fetch(full_key, expires_in: ttl) do
+        cache_miss = true
+        ::Foreman::Logging.logger('registration').debug "proxy cache=MISS key=#{full_key}"
+        r = Resources::Candlepin::Proxy.get(@request_path)
+        return nil if r.code.to_i >= 400 # don't cache errors — fall through to normal proxy
+        [JSON.parse(r.body), r.code.to_i]
+      end
+      ::Foreman::Logging.logger('registration').debug "proxy cache=HIT key=#{full_key}" unless cache_miss
       result
     end
 

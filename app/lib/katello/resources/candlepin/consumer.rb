@@ -99,18 +99,20 @@ module Katello
           end
 
           def virtual_guests(uuid)
-            response = Candlepin::CandlepinResource.get(join_path(path(uuid), 'guests'), self.default_headers).body
-            ::Katello::Util::Data.array_with_indifferent_access JSON.parse(response)
+            Rails.cache.fetch("katello/proxy/guests/#{uuid}", expires_in: 1.minute) do
+              response = Candlepin::CandlepinResource.get(join_path(path(uuid), 'guests'), self.default_headers).body
+              ::Katello::Util::Data.array_with_indifferent_access JSON.parse(response)
+            end
           rescue RestClient::Exception
             return []
           end
 
           def virtual_host(uuid)
-            response = Candlepin::CandlepinResource.get(join_path(path(uuid), 'host'), self.default_headers).body
-            if response.present?
-              JSON.parse(response).with_indifferent_access
-            else
-              return nil
+            Rails.cache.fetch("katello/proxy/host/#{uuid}", expires_in: 1.minute) do
+              response = Candlepin::CandlepinResource.get(join_path(path(uuid), 'host'), self.default_headers).body
+              if response.present?
+                JSON.parse(response).with_indifferent_access
+              end
             end
           rescue RestClient::Exception
             return nil

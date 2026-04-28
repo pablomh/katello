@@ -82,6 +82,40 @@ module Katello
         end
       end
 
+      class ActivationKeyTest < ActiveSupport::TestCase
+        def setup
+          @ak_id = 'test-ak-123'
+          @cache_key = "katello/proxy/activation_key/#{@ak_id}"
+          Rails.cache.delete(@cache_key)
+        end
+
+        def teardown
+          Rails.cache.delete(@cache_key)
+        end
+
+        def test_individual_get_serves_from_cache
+          cached = [{'id' => @ak_id, 'name' => 'my-ak'}.with_indifferent_access]
+          Rails.cache.write(@cache_key, cached, expires_in: 5.minutes)
+
+          # No HTTP call expected — cache is warm
+          ActivationKey.expects(:issue_request).never
+
+          result = ActivationKey.get(@ak_id)
+          assert_equal @ak_id, result.first['id']
+        end
+
+        def test_get_with_params_bypasses_cache
+          cached = [{'id' => @ak_id, 'name' => 'cached-ak'}.with_indifferent_access]
+          Rails.cache.write(@cache_key, cached, expires_in: 5.minutes)
+
+          fresh = [{'id' => @ak_id, 'name' => 'fresh-ak'}]
+          ActivationKey.stubs(:issue_request).returns(stub(:body => fresh.to_json, :code => 200))
+
+          result = ActivationKey.get(@ak_id, '?some=param')
+          assert_equal 'fresh-ak', result.first['name']
+        end
+      end
+
       class ProductTest < ActiveSupport::TestCase
         def setup
         end

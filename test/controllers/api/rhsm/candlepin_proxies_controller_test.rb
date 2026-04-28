@@ -541,6 +541,89 @@ module Katello
       end
     end
 
+    describe "proxy cache for get action" do
+      before do
+        uuid = @host.subscription_facet.uuid
+        User.stubs(:consumer?).returns(true)
+        stub_cp_consumer_with_uuid(uuid)
+      end
+
+      it "caches accessible_content per org" do
+        uuid = @host.subscription_facet.uuid
+        org = @host.organization
+        Rails.cache.delete("katello/proxy/accessible_content/#{org.id}")
+        body = [{ 'contentId' => '123', 'label' => 'repo1' }]
+
+        Resources::Candlepin::Proxy.expects(:get).once
+          .returns(stub(:code => '200', :body => body.to_json))
+
+        2.times { get :get, params: { :id => uuid }, as: :json }
+
+        assert_response :success
+      end
+
+      it "caches content_overrides per consumer" do
+        uuid = @host.subscription_facet.uuid
+        Rails.cache.delete("katello/proxy/content_overrides/#{uuid}")
+        body = []
+
+        Resources::Candlepin::Proxy.expects(:get).once
+          .returns(stub(:code => '200', :body => body.to_json))
+
+        2.times do
+          @controller.instance_variable_set(:@request_path, "/consumers/#{uuid}/content_overrides")
+          get :get, params: { :id => uuid }, as: :json
+        end
+
+        assert_response :success
+      end
+
+      it "caches owner per org" do
+        uuid = @host.subscription_facet.uuid
+        org = @host.organization
+        Rails.cache.delete("katello/proxy/owner/#{org.id}")
+        body = { 'key' => org.label, 'displayName' => org.name }
+
+        Resources::Candlepin::Proxy.expects(:get).once
+          .returns(stub(:code => '200', :body => body.to_json))
+
+        2.times do
+          @controller.instance_variable_set(:@request_path, "/consumers/#{uuid}/owner")
+          get :get, params: { :id => uuid }, as: :json
+        end
+
+        assert_response :success
+      end
+
+      it "does not cache error responses" do
+        uuid = @host.subscription_facet.uuid
+        org = @host.organization
+        Rails.cache.delete("katello/proxy/accessible_content/#{org.id}")
+
+        Resources::Candlepin::Proxy.expects(:get).twice
+          .returns(stub(:code => '500', :body => 'error'))
+
+        2.times do
+          @controller.instance_variable_set(:@request_path, "/consumers/#{uuid}/accessible_content")
+          get :get, params: { :id => uuid }, as: :json
+        end
+      end
+
+      it "falls through to normal proxy for non-cacheable paths" do
+        uuid = @host.subscription_facet.uuid
+
+        Resources::Candlepin::Proxy.expects(:get).twice
+          .returns(stub(:code => '200', :body => '{}'))
+
+        2.times do
+          @controller.instance_variable_set(:@request_path, "/consumers/#{uuid}/some_other_endpoint")
+          get :get, params: { :id => uuid }, as: :json
+        end
+
+        assert_response :success
+      end
+    end
+
     describe "get parent host" do
       it "can get parent host" do
         capsule = "foocapsule.example.com"
