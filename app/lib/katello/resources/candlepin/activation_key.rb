@@ -4,10 +4,18 @@ module Katello
       class ActivationKey < CandlepinResource
         class << self
           def get(id = nil, params = '', owner = nil)
-            akeys_json = super(path(id, owner) + params, self.default_headers).body
-            akeys = JSON.parse(akeys_json)
-            akeys = [akeys] unless id.nil?
-            ::Katello::Util::Data.array_with_indifferent_access akeys
+            if id && params.blank?
+              # Cache individual AK lookups — same AK is used for hundreds of hosts.
+              Rails.cache.fetch("katello/proxy/activation_key/#{id}", expires_in: 5.minutes) do
+                akeys_json = super(path(id, owner), self.default_headers).body
+                [JSON.parse(akeys_json)].map(&:with_indifferent_access)
+              end
+            else
+              akeys_json = super(path(id, owner) + params, self.default_headers).body
+              akeys = JSON.parse(akeys_json)
+              akeys = [akeys] unless id.nil?
+              ::Katello::Util::Data.array_with_indifferent_access akeys
+            end
           end
 
           def create(name, owner_key, service_level, release_version, purpose_role, purpose_usage)

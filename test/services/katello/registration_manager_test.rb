@@ -214,7 +214,6 @@ module Katello
         ::Katello::RegistrationManager.expects(:get_uuid).returns("fake-uuid-from-katello")
 
         ::Katello::Resources::Candlepin::Consumer.expects(:create).with([@content_view_environment.cp_id], rhsm_params, [], @library.organization).returns(:uuid => 'fake-uuid-from-candlepin')
-        ::Katello::Resources::Candlepin::Consumer.expects(:get).once.with('fake-uuid-from-candlepin').returns({})
         ::Katello::Host::SubscriptionFacet.any_instance.expects(:update_hypervisor).twice
         ::Katello::Host::SubscriptionFacet.any_instance.expects(:update_guests).twice
 
@@ -232,7 +231,6 @@ module Katello
 
         ::Katello::Resources::Candlepin::Consumer.expects(:create).with([cvpe.cp_id], rhsm_params, ["cp_name_baz"], @host_collection.organization).returns(:uuid => 'fake-uuid-from-katello')
         Katello::ActivationKey.any_instance.stubs(:cp_name).returns('cp_name_baz')
-        ::Katello::Resources::Candlepin::Consumer.expects(:get).once.with('fake-uuid-from-katello').returns({})
         ::Katello::Host::SubscriptionFacet.any_instance.expects(:update_hypervisor).twice
         ::Katello::Host::SubscriptionFacet.any_instance.expects(:update_guests).twice
         ::Host::Managed.any_instance.stubs(:refresh_statuses)
@@ -273,7 +271,6 @@ module Katello
         ::Host::Managed.any_instance.stubs(:refresh_statuses)
 
         ::Katello::Resources::Candlepin::Consumer.expects(:create).with([@content_view_environment.cp_id], rhsm_params, [], @content_view.organization).returns(:uuid => 'fake-uuid-from-katello')
-        ::Katello::Resources::Candlepin::Consumer.expects(:get).once.with('fake-uuid-from-katello').returns({})
 
         ::Katello::RegistrationManager.register_host(@host, rhsm_params, [@content_view_environment])
       end
@@ -471,6 +468,68 @@ module Katello
         end
       end
 
+      def test_import_critical_registration_facts_imports_critical_subset
+        new_host = ::Host::Managed.new(:name => 'foobar.example.com', :managed => false, :organization => @org)
+        critical_facts = {'distribution.name' => 'RHEL', 'distribution.version' => '9.2', 'uname.machine' => 'x86_64'}
+        all_facts = critical_facts.merge('network.hostname' => 'foobar.example.com')
+
+        ::Katello::RegistrationManager.expects(:get_uuid).returns('fake-uuid')
+        ::Katello::Resources::Candlepin::Consumer.expects(:create).returns(:uuid => 'fake-uuid')
+        ::Katello::Resources::Candlepin::Consumer.expects(:get).returns({})
+        ::Katello::Host::SubscriptionFacet.any_instance.stubs(:update_hypervisor)
+        ::Katello::Host::SubscriptionFacet.any_instance.stubs(:update_guests)
+        ::Host::Managed.any_instance.stubs(:refresh_statuses)
+
+        ::Katello::Host::SubscriptionFacet.expects(:update_facts).with(new_host, critical_facts, additive: true)
+
+        ::Katello::RegistrationManager.register_host(new_host, rhsm_params.merge(:facts => all_facts), [@content_view_environment])
+      end
+
+      def test_import_critical_registration_facts_skips_when_no_critical_facts_present
+        new_host = ::Host::Managed.new(:name => 'foobar.example.com', :managed => false, :organization => @org)
+        non_critical_facts = {'network.hostname' => 'foobar.example.com'}
+
+        ::Katello::RegistrationManager.expects(:get_uuid).returns('fake-uuid')
+        ::Katello::Resources::Candlepin::Consumer.expects(:create).returns(:uuid => 'fake-uuid')
+        ::Katello::Resources::Candlepin::Consumer.expects(:get).returns({})
+        ::Katello::Host::SubscriptionFacet.any_instance.stubs(:update_hypervisor)
+        ::Katello::Host::SubscriptionFacet.any_instance.stubs(:update_guests)
+        ::Host::Managed.any_instance.stubs(:refresh_statuses)
+
+        ::Katello::Host::SubscriptionFacet.expects(:update_facts).never
+
+        ::Katello::RegistrationManager.register_host(new_host, rhsm_params.merge(:facts => non_critical_facts), [@content_view_environment])
+      end
+
+      def test_import_critical_registration_facts_rescue_does_not_fail_registration
+        new_host = ::Host::Managed.new(:name => 'foobar.example.com', :managed => false, :organization => @org)
+        critical_facts = {'distribution.name' => 'RHEL', 'uname.machine' => 'x86_64'}
+
+        ::Katello::RegistrationManager.expects(:get_uuid).returns('fake-uuid')
+        ::Katello::Resources::Candlepin::Consumer.expects(:create).returns(:uuid => 'fake-uuid')
+        ::Katello::Resources::Candlepin::Consumer.expects(:get).returns({})
+        ::Katello::Host::SubscriptionFacet.any_instance.stubs(:update_hypervisor)
+        ::Katello::Host::SubscriptionFacet.any_instance.stubs(:update_guests)
+        ::Host::Managed.any_instance.stubs(:refresh_statuses)
+
+        ::Katello::Host::SubscriptionFacet.expects(:update_facts).raises(StandardError, 'db failure')
+        Rails.logger.expects(:warn).with(regexp_matches(/foobar\.example\.com.*StandardError.*db failure/))
+
+        assert_nothing_raised do
+          ::Katello::RegistrationManager.register_host(new_host, rhsm_params.merge(:facts => critical_facts), [@content_view_environment])
+      def test_registration_dead_candlepin_clears_cache
+        new_host = ::Host::Managed.new(:name => 'foobar.example.com', :managed => false, :organization => @library.organization)
+
+        ::Host.expects(:find).returns(new_host)
+        new_host.stubs(:destroy)
+        ::Katello::Resources::Candlepin::Consumer.expects(:create).raises("uhoh!")
+        ::Katello::Resources::Candlepin::CandlepinPing.expects(:clear_cache).once
+
+        assert_raises(Exception) do
+          ::Katello::RegistrationManager.register_host(new_host, rhsm_params, [@content_view_environment])
+        end
+      end
+
       # this case can only happen if candlepin/pulp dies after the host is unregistered, but before it's re-registered.
       def test_registration_existing_host_dead_backend_service
         ::Host::Managed.any_instance.stubs(:update_candlepin_associations).twice
@@ -487,6 +546,18 @@ module Katello
         assert_raises(Exception) do
           ::Katello::RegistrationManager.register_host(@host, rhsm_params, [@content_view_environment])
         end
+      end
+    end
+
+    class CheckRegistrationServicesTest < ActiveSupport::TestCase
+      def test_delegates_to_candlepin_ping
+        Katello::Resources::Candlepin::CandlepinPing.expects(:ok?).returns(true)
+        assert Katello::RegistrationManager.check_registration_services
+      end
+
+      def test_returns_false_when_candlepin_not_ok
+        Katello::Resources::Candlepin::CandlepinPing.expects(:ok?).returns(false)
+        refute Katello::RegistrationManager.check_registration_services
       end
     end
   end
