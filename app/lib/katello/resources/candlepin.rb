@@ -4,6 +4,8 @@ module Katello
       TOTAL_COUNT_HEADER = :x_total_count # as parsed by rest_client
 
       class CandlepinResource < HttpResource
+        include Candlepin::PersistentConnection
+
         cfg = SETTINGS[:katello][:candlepin]
         url = cfg[:url]
         uri = URI.parse(url)
@@ -81,6 +83,7 @@ module Katello
       end
 
       class UpstreamCandlepinResource < CandlepinResource
+        self.use_persistent_connection = false
         extend ::Katello::Util::HttpProxy
 
         self.prefix = '/subscription'
