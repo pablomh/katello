@@ -1,5 +1,14 @@
 module Katello
   class RegistrationManager
+    # Facts strictly required at registration time so that RhelLifecycleStatus can be
+    # computed immediately. These drive OS and architecture detection in HostFactImporter.
+    # All remaining facts arrive via the subsequent PUT /rhsm/consumers/:id call (step 6).
+    REGISTRATION_CRITICAL_FACTS = %w[
+      distribution.name
+      distribution.version
+      uname.machine
+    ].freeze
+
     class << self
       private :new
       delegate :propose_existing_hostname, :new_host_from_facts, to: Katello::Host::SubscriptionFacet
@@ -33,13 +42,13 @@ module Katello
         )
         host.organization = organization unless host.organization
 
-        register_host(host, rhsm_params, content_view_environments, activation_keys)
+        consumer_data = register_host(host, rhsm_params, content_view_environments, activation_keys)
 
         if host_uuid_overridden
           host.subscription_facet.update_dmi_uuid_override(host_uuid)
         end
 
-        host
+        [host, consumer_data]
       end
 
       def dmi_uuid_allowed_dups
@@ -181,27 +190,35 @@ module Katello
         host.subscription_facet = populate_subscription_facet(host, activation_keys, consumer_params, host_uuid)
         host.save! # the host has content and subscription facets at this point
 
+        consumer_data = nil
         User.as_anonymous_admin do
-          begin
+          consumer_data = begin
             create_in_candlepin(host, content_view_environments, consumer_params, activation_keys)
           rescue StandardError => e
+            # Invalidate the cached Candlepin status immediately so subsequent
+            # registrations fail fast at check_registration_services rather than
+            # proceeding through DB writes only to roll back when CP is down.
+            Katello::Resources::Candlepin::CandlepinPing.clear_cache
             # we can't call CP here since something bad already happened. Just clean up our DB as best as we can.
             host.subscription_facet.try(:destroy!)
             new_host ? remove_partially_registered_new_host(host) : remove_host_artifacts(host)
             raise e
           end
 
-          finalize_registration(host)
+          # Import only the facts needed for OS/architecture detection so that
+          # RhelLifecycleStatus is correct immediately after registration.
+          # The full fact set arrives via PUT /rhsm/consumers/:id (step 6).
+          import_critical_registration_facts(host, consumer_params[:facts])
+
+          finalize_registration(host, consumer_data)
         end
+
+        consumer_data
       end
       # rubocop:enable Metrics/MethodLength
 
       def check_registration_services
-        ping_results = {}
-        User.as_anonymous_admin do
-          ping_results = Katello::Ping.ping
-        end
-        ping_results[:services][:candlepin][:status] == "ok"
+        Katello::Resources::Candlepin::CandlepinPing.ok?
       end
 
       private
@@ -230,20 +247,29 @@ module Katello
       def create_in_candlepin(host, content_view_environments, consumer_params, activation_keys)
         # if CP fails, nothing to clean up yet w.r.t. backend services
         cp_create = ::Katello::Resources::Candlepin::Consumer.create(content_view_environments.map(&:cp_id), consumer_params, activation_keys.map(&:cp_name), host.organization)
-        ::Katello::Host::SubscriptionFacet.update_facts(host, consumer_params[:facts]) unless consumer_params[:facts].blank?
-        uuid = cp_create[:uuid]
-        if uuid.present? && uuid != host.subscription_facet.uuid
-          Rails.logger.info(_("Candlepin returned different consumer uuid than requested (%s), updating uuid in subscription_facet.") % uuid)
-          host.subscription_facet.uuid = uuid
+        consumer_data = normalize_consumer_response(cp_create)
+        if consumer_data['uuid'] != host.subscription_facet.uuid
+          Rails.logger.info(_("Candlepin returned different consumer uuid than requested (%s), updating uuid in subscription_facet.") % consumer_data['uuid'])
+          host.subscription_facet.uuid = consumer_data['uuid']
           host.subscription_facet.save!
         end
-        uuid
+        # Return the normalized consumer response so callers can reuse it and
+        # avoid redundant GET /candlepin/consumers/{uuid} calls.
+        consumer_data
       end
 
-      def finalize_registration(host)
-        host = ::Host.find(host.id)
-        host.subscription_facet.update_from_consumer_attributes(host.subscription_facet.candlepin_consumer.
-            consumer_attributes.except(:guestIds, :facts))
+      # Validates the minimum contract of a Candlepin consumer response
+      # (a consumer uuid must be present) before returning it. Centralises
+      # this check so callers can rely on the returned value being valid.
+      # Consumer.create already returns a HashWithIndifferentAccess so no
+      # type conversion is needed.
+      def normalize_consumer_response(cp_response)
+        raise ::Katello::Errors::CandlepinError, _("Candlepin consumer registration response is missing a uuid") if cp_response['uuid'].blank?
+        cp_response
+      end
+
+      def finalize_registration(host, consumer_attributes)
+        host.subscription_facet.update_from_consumer_attributes(consumer_attributes.except(:guestIds, :facts))
         host.subscription_facet.save!
         host.refresh_statuses([
                                 ::Katello::ErrataStatus,
@@ -312,6 +338,19 @@ module Katello
         subscription_facet.save!
         subscription_facet.activation_keys = activation_keys
         subscription_facet
+      end
+
+      def import_critical_registration_facts(host, facts)
+        critical = facts&.slice(*REGISTRATION_CRITICAL_FACTS)
+        return if critical.blank?
+        ::Katello::Host::SubscriptionFacet.update_facts(host, critical, additive: true)
+      rescue StandardError => e
+        # This import is best-effort: Candlepin registration already succeeded and
+        # the full fact set will arrive via PUT /rhsm/consumers/:id (step 6).
+        # Rescuing StandardError (rather than a specific subclass) is intentional —
+        # any failure here is non-fatal, and propagating it would mislead the client
+        # into thinking registration failed when it actually succeeded.
+        Rails.logger.warn("Failed to import critical facts for host #{host.name}: #{e.class}: #{e.message}")
       end
 
       def remove_host_artifacts(host, clear_content_facet: true, preserve_for_provisioning: false)
