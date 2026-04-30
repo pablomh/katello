@@ -291,7 +291,7 @@ module Katello
       @host.subscription_facet.last_checkin = Time.now
       @host.subscription_facet.save!
       uuid = @host.subscription_facet.uuid
-      result = Rails.cache.fetch("katello/proxy/cert_serials/#{uuid}", expires_in: 1.minute) do
+      result = Rails.cache.fetch("katello/proxy/cert_serials/#{uuid}", expires_in: 3.minutes) do
         Katello::Resources::Candlepin::Consumer.serials(uuid)
       end
       render :json => result
@@ -315,7 +315,7 @@ module Katello
 
     def compliance_status(id)
       cache_miss = false
-      result = Rails.cache.fetch("katello/compliance/#{id}", expires_in: 1.minute) do
+      result = Rails.cache.fetch("katello/compliance/#{id}", expires_in: 3.minutes) do
         cache_miss = true
         ::Foreman::Logging.logger('registration').debug "compliance cache=MISS uuid=#{id}"
         r = Resources::Candlepin::Proxy.get(@request_path)
@@ -340,10 +340,10 @@ module Katello
         cache_proxy_get("accessible_content/#{org_id}", 5.minutes) if org_id
       when %r{/consumers/([^/]+)/content_overrides\z}
         # Per-consumer, but empty for new consumers.
-        cache_proxy_get("content_overrides/#{Regexp.last_match(1)}", 1.minute)
+        cache_proxy_get("content_overrides/#{Regexp.last_match(1)}", 3.minutes)
       when %r{/consumers/([^/]+)/release\z}
         # Per-consumer preferred release.
-        cache_proxy_get("release/#{Regexp.last_match(1)}", 1.minute)
+        cache_proxy_get("release/#{Regexp.last_match(1)}", 3.minutes)
       when %r{/consumers/[^/]+/owner\z}
         # Identical for all hosts in the same org.
         org_id = @host&.organization_id
