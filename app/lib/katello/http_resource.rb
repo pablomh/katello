@@ -1,5 +1,7 @@
 require 'oauth'
 require 'cgi'
+require 'faraday'
+require 'faraday/net_http_persistent'
 
 module Katello
   class HttpResource
@@ -35,22 +37,14 @@ module Katello
       @json[key] = value
     end
 
-    REQUEST_MAP = {
-      get: Net::HTTP::Get,
-      post: Net::HTTP::Post,
-      put: Net::HTTP::Put,
-      patch: Net::HTTP::Patch,
-      delete: Net::HTTP::Delete,
-    }.freeze
-
     class << self
-      REQUEST_MAP.keys.each do |key|
-        define_method(key) do |*args|
+      [:get, :post, :put, :patch, :delete].each do |method|
+        define_method(method) do |*args|
           issue_request(
-            method: key,
+            method: method,
             path: args.first,
             headers: args.length > 1 ? args.last : nil,
-            payload: args.length > 2 ? args[1] : nil # non-GET method signatures use payload as the second argument, keeping headers as the last element
+            payload: args.length > 2 ? args[1] : nil
           )
         end
       end
@@ -60,24 +54,24 @@ module Katello
       end
 
       def process_response(resp)
-        logger.debug "Processing response: #{resp.code}"
+        logger.debug "Processing response: #{resp.status}"
         logger.debug filter_sensitive_data(resp.body)
-        return resp unless resp.code.to_i >= 400
+        return resp unless resp.status >= 400
         parsed = {}
         message = "Rest exception while processing the call"
         service_code = ""
-        status_code = resp.code.to_s
+        status_code = resp.status.to_s
         begin
           parsed = JSON.parse resp.body
           message = parsed["displayMessage"] if parsed["displayMessage"]
           service_code = parsed["code"] if parsed["code"]
         rescue => error
           logger.error "Error parsing the body: " << error.backtrace.join("\n")
-          if %w(404 500 502 503 504).member? resp.code.to_s
-            logger.error "Remote server status code " << resp.code.to_s
+          if %w(404 500 502 503 504).member? resp.status.to_s
+            logger.error "Remote server status code " << resp.status.to_s
             raise RestClientException, {:message => error.to_s, :service_code => service_code, :code => status_code}, caller
           else
-            raise NetworkException, [resp.code.to_s, resp.body].reject { |s| s.blank? }.join(' ')
+            raise NetworkException, [resp.status.to_s, resp.body].reject { |s| s.blank? }.join(' ')
           end
         end
         fail RestClientException, {:message => message, :service_code => service_code, :code => status_code}, caller
@@ -92,22 +86,23 @@ module Katello
           logger.debug "Body: Error: could not render payload as json"
         end
 
-        client = rest_client(REQUEST_MAP[method], method, path)
-        args = [method, payload, headers].compact
+        conn = faraday_connection(path)
+        response = conn.send(method, path) do |req|
+          req.headers.merge!(headers) if headers
+          req.body = payload if payload
+        end
 
-        process_response(client.send(*args))
-      rescue RestClient::Exception => e
-        raise_rest_client_exception e, path, method.upcase
-      rescue Errno::ECONNREFUSED
+        process_response(response)
+      rescue Faraday::ConnectionFailed
         service = path.split("/").second
         raise Errors::ConnectionRefusedException, _("A backend service [ %s ] is unreachable") % service.capitalize
+      rescue Faraday::Error => e
+        raise_faraday_exception e, path, method.upcase
       end
 
-      # re-raise the same exception with nicer error message
-      def raise_rest_client_exception(e, a_path, http_method)
-        msg = "#{name}: #{e.message} #{e.http_body} (#{http_method} #{a_path})"
-        e.message = msg
-        fail e
+      def raise_faraday_exception(e, a_path, http_method)
+        msg = "#{name}: #{e.message} (#{http_method} #{a_path})"
+        raise RestClientException, { message: msg, service_code: '', code: e.response&.dig(:status).to_s }
       end
 
       def join_path(*args)
@@ -117,41 +112,48 @@ module Katello
         end
       end
 
-      # Creates a RestClient::Resource class with a signed OAuth style
-      # Authentication header added to the request headers.
-      def rest_client(http_type, method, path)
-        # Need full path to properly generate the signature
-        url = self.site + path
+      def faraday_connection(path = '')
+        url = self.site
+        timeout = SETTINGS[:katello][:rest_client_timeout]
+
+        oauth_header = nil
+        if self.consumer_key && self.consumer_secret
+          full_url = url + path
+          oauth_header = build_oauth_header(full_url, :get)
+        end
+
+        Faraday.new(url: url) do |f|
+          f.options.open_timeout = timeout
+          f.options.timeout = timeout
+
+          if self.ssl_ca_file
+            f.ssl.ca_file = self.ssl_ca_file
+          end
+          if self.ssl_client_cert
+            f.ssl.client_cert = self.ssl_client_cert
+          end
+          if self.ssl_client_key
+            f.ssl.client_key = self.ssl_client_key
+          end
+
+          f.request :authorization, 'OAuth', oauth_header if oauth_header
+
+          f.adapter :net_http_persistent
+        end
+      end
+
+      def build_oauth_header(url, method)
         params = { :site => self.site,
                    :http_method => method,
                    :request_token_path => "",
                    :authorize_path => "",
-                   :access_token_path => ""}
-
+                   :access_token_path => "" }
         params[:ca_file] = self.ssl_ca_file unless self.ssl_ca_file.nil?
-        # New OAuth consumer to setup signing the request
-        consumer = OAuth::Consumer.new(self.consumer_key,
-                            self.consumer_secret,
-                            params)
 
-        # The type is passed in, GET/POST/PUT/DELETE
-        request = http_type.new(url)
-
-        # Sign the request with OAuth
+        consumer = OAuth::Consumer.new(self.consumer_key, self.consumer_secret, params)
+        request = Net::HTTP::Get.new(url)
         consumer.sign!(request)
-        # Extract the header and add it to the RestClient
-        added_header = {'Authorization' => request['Authorization']}
-
-        options = {
-          :headers => added_header,
-          :open_timeout => SETTINGS[:katello][:rest_client_timeout],
-          :timeout => SETTINGS[:katello][:rest_client_timeout],
-        }
-        options[:ssl_ca_file] = self.ssl_ca_file unless self.ssl_ca_file.nil?
-        options[:ssl_client_cert] = self.ssl_client_cert unless self.ssl_client_cert.nil?
-        options[:ssl_client_key] = self.ssl_client_key unless self.ssl_client_key.nil?
-
-        RestClient::Resource.new(url, options)
+        request['Authorization']
       end
 
       def hash_to_query(query_parameters)
