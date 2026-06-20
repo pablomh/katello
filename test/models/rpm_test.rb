@@ -130,6 +130,19 @@ module Katello
 
       assert_equal [@rpm_one], repo_two.reload.rpms
     end
+
+    def test_copy_repository_associations_skips_delete_for_empty_destination
+      repo_one = @repo
+      repo_two = katello_repositories(:fedora_17_x86_64_dev)
+      empty_scope = mock
+
+      repo_one.rpms = [@rpm_one]
+      empty_scope.expects(:exists?).returns(false)
+      Katello::RepositoryRpm.expects(:where).with(repository: repo_two).returns(empty_scope)
+      ActiveRecord::Base.connection.expects(:execute).never
+
+      Katello::Rpm.copy_repository_associations(repo_one, repo_two)
+    end
   end
 
   class ApplicablityTest < RpmTestBase

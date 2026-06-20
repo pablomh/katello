@@ -49,7 +49,10 @@ module Katello
           # validations should occur before the action so that the request can fail and not render multiple responses
           cves = validate_content_view_environment_params
           yield
-          # the actual assigning needs to wait until the host is created
+          # Skip if the create action didn't persist the host
+          return unless @host&.persisted?
+          # Reload so @host.content_facet reflects what the create action saved
+          @host.reload
           set_content_view_environments(cves)
         end
 
@@ -60,16 +63,16 @@ module Katello
 
         def validate_content_view_environment_params
           content_facet_attributes = params.dig(:host, :content_facet_attributes)
-          return if content_facet_attributes.blank? ||
-          (cve_params[:content_view_id].present? && cve_params[:lifecycle_environment_id].present?)
+          return if content_facet_attributes.blank?
+          return unless cvenv_params[:content_view_environments].present? || cvenv_params[:content_view_environment_ids].present?
 
           cves = ::Katello::ContentViewEnvironment.fetch_content_view_environments(
-            labels: cve_params[:content_view_environments],
-            ids: cve_params[:content_view_environment_ids],
+            labels: cvenv_params[:content_view_environments],
+            ids: cvenv_params[:content_view_environment_ids],
             organization: find_organization || @host&.organization)
           if cves.blank?
-            handle_errors(labels: cve_params[:content_view_environments],
-              ids: cve_params[:content_view_environment_ids])
+            handle_errors(labels: cvenv_params[:content_view_environments],
+              ids: cvenv_params[:content_view_environment_ids])
           end
           cves
         end
@@ -88,8 +91,8 @@ module Katello
         end
         # rubocop:enable Naming/AccessorMethodName
 
-        def cve_params
-          params.require(:host).require(:content_facet_attributes).permit(:content_view_id, :lifecycle_environment_id, content_view_environments: [], content_view_environment_ids: [])
+        def cvenv_params
+          params.require(:host).require(:content_facet_attributes).permit(content_view_environments: [], content_view_environment_ids: [])
         end
       end
     end

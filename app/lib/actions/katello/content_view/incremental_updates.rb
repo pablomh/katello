@@ -17,7 +17,7 @@ module Actions
           old_new_version_map = {}
           output_for_version_ids = []
           # Extract composite CV IDs that will be updated via propagate to prevent duplicate auto-publish
-          propagated_composite_cv_ids = composite_version_environments.map { |cve| cve[:content_view_version].content_view_id }.compact.uniq
+          propagated_composite_cv_ids = composite_version_environments.map { |cvenv| cvenv[:content_view_version].content_view_id }.compact.uniq
 
           sequence do
             concurrence do
@@ -32,6 +32,11 @@ module Actions
 
                     if version.content_view.composite?
                       fail _("Cannot perform an incremental update on a Composite Content View Version (%{name} version version %{version}") %
+                        {:name => version.content_view.name, :version => version.version}
+                    end
+
+                    if version.content_view.rolling?
+                      fail _("Cannot perform an incremental update on a Rolling Content View Version (%{name} version %{version})") %
                         {:name => version.content_view.name, :version => version.version}
                     end
 

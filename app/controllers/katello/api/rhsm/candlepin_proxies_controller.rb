@@ -42,11 +42,16 @@ module Katello
           if body_json['message'] && body_json['displayMessage'].nil?
             body_json['displayMessage'] = body_json['message']
           end
-          response.body = body_json.to_s
+          response.body = body_json.to_json
         rescue JSON::ParserError
           # Not a json response, leave as-is
         end
       end
+    end
+
+    # subscription-manager expects displayMessage in error responses
+    def error_response_json(display_message, errors)
+      { :displayMessage => display_message, :errors => errors }
     end
 
     rescue_from RestClient::Exception do |e|
@@ -164,7 +169,7 @@ module Katello
       User.as_anonymous_admin do
         @host.import_tracer_profile(params[:traces])
       end
-      render json: { displayMessage: _("Tracer profile uploaded successfully") }
+      render json: { message: _("Tracer profile uploaded successfully") }
     end
 
     def available_releases
@@ -427,13 +432,13 @@ module Katello
     end
 
     def get_content_view_environment(key, value)
-      cve = nil
+      cvenv = nil
       if value
-        cve = ContentViewEnvironment.where(key => value).first
-        fail HttpErrors::NotFound, _("Couldn't find environment '%s'") % value unless cve
-        deny_access unless cve.readable? || User.consumer?
+        cvenv = ContentViewEnvironment.where(key => value).first
+        fail HttpErrors::NotFound, _("Couldn't find environment '%s'") % value unless cvenv
+        deny_access unless cvenv.readable? || User.consumer?
       end
-      cve
+      cvenv
     end
 
     def get_content_view_environments(label = nil, organization = nil)
@@ -535,10 +540,10 @@ module Katello
         if params[:consumer]
           User.consumer? && current_user.uuid == params[:consumer]
         else
-          User.consumer? || ::User.current.can?(:view_organizations, self)
+          User.consumer? || ::User.current.can?(:view_organizations)
         end
       when "rhsm_proxy_owner_servicelevels_path", "rhsm_proxy_owner_system_purpose_path"
-        (User.consumer? || ::User.current.can?(:view_organizations, self))
+        (User.consumer? || ::User.current.can?(:view_organizations))
       when "rhsm_proxy_consumer_accessible_content_path", "rhsm_proxy_consumer_certificates_path",
            "rhsm_proxy_consumer_releases_path", "rhsm_proxy_certificate_serials_path",
            "rhsm_proxy_consumer_entitlements_path", "rhsm_proxy_consumer_entitlements_post_path",

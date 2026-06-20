@@ -44,13 +44,14 @@ module Katello
     def bulk_add_host_collections
       unless params[:host_collection_ids].blank?
         display_messages = []
+        host_ids = @hosts.map(&:id)
 
         @host_collections.each do |host_collection|
-          pre_host_collection_count = host_collection.host_ids.count
-          host_collection.host_ids =  (host_collection.host_ids + @hosts.map(&:id)).uniq
-          host_collection.save!
-
-          final_count = host_collection.host_ids.count - pre_host_collection_count
+          membership_update = host_collection.add_host_ids!(
+            :requested_host_ids => host_ids,
+            :authorized_host_ids => host_ids
+          )
+          final_count = membership_update[:updated_host_ids].length
           msg = if final_count == 0
                   _("All selected hosts were already members of host collection %{host_collection}.") %
                               {:host_collection => host_collection.name }
@@ -74,12 +75,13 @@ module Katello
       display_messages = []
 
       unless params[:host_collection_ids].blank?
+        host_ids = @hosts.map(&:id)
         @host_collections.each do |host_collection|
-          pre_host_collection_count = host_collection.host_ids.count
-          host_collection.host_ids =  (host_collection.host_ids - @hosts.map(&:id)).uniq
-          host_collection.save!
-
-          final_count = pre_host_collection_count - host_collection.host_ids.count
+          membership_update = host_collection.remove_host_ids!(
+            :requested_host_ids => host_ids,
+            :authorized_host_ids => host_ids
+          )
+          final_count = membership_update[:updated_host_ids].length
           display_messages << _("Removed %{count} host(s) from host collection %{host_collection}.") %
               {:count => final_count, :host_collection => host_collection.name }
         end
@@ -163,7 +165,7 @@ module Katello
                            "Updated content view environments for %{count} hosts",
                            registered_hosts.count) % { :count => registered_hosts.count }
 
-      response = { :displayMessage => success_message }
+      response = { :message => success_message }
 
       if unregistered_count > 0
         skipped_message = n_("Skipped %{count} unregistered host",
@@ -224,13 +226,14 @@ module Katello
       version_environments = {}
       content_facets = Katello::Host::ContentFacet.with_non_installable_errata(@errata, @hosts)
 
-      ContentViewEnvironment.for_content_facets(content_facets).each do |cve|
-        version = cve.content_view_version
+      ContentViewEnvironment.for_content_facets(content_facets).each do |cvenv|
+        version = cvenv.content_view_version
+        next if version.content_view.rolling?
         version_environment = version_environments[version] || {:content_view_version => version, :environments => []}
-        version_environment[:environments] << cve.environment unless version_environment[:environments].include?(cve.environment)
+        version_environment[:environments] << cvenv.environment unless version_environment[:environments].include?(cvenv.environment)
         version_environment[:next_version] ||= version.next_incremental_version
         version_environment[:content_host_count] ||= 0
-        version_environment[:content_host_count] += content_facets.with_content_view_environments(cve).count
+        version_environment[:content_host_count] += content_facets.with_content_view_environments(cvenv).count
 
         if version.content_view.composite?
           version_environment[:components] = version.components_needing_errata(@errata)

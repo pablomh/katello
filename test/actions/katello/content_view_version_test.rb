@@ -112,6 +112,42 @@ module ::Actions::Katello::ContentViewVersion
         assert_action_planned_with(action, ::Actions::Katello::Repository::IndexContent, id: new_repo.id)
       end
 
+      it 'defers clone metadata for repos updated via multicopy' do
+        pulp3_cvv_setup
+        ::Katello::Repository.any_instance.stubs(:soft_copy_of_library?).returns(false)
+        ::Actions::Katello::Repository::CloneToVersion.any_instance.expects(:plan).with do |repositories, _version, destination_repo, options|
+          repositories == [library_repo] &&
+            destination_repo == new_repo &&
+            options[:incremental] == true &&
+            options[:generate_metadata] == false
+        end
+
+        plan_action(action, content_view_version, [library], :resolve_dependencies => false, :content => {:package_ids => [old_rpm.id]})
+
+        assert_action_planned_with(action, ::Actions::Pulp3::Repository::MultiCopyUnits,
+                                  { [library_repo.id] => { :dest_repo => new_repo.id, :base_version => 1, :base_repository_id => library_repo.id } },
+                                  { :debs => [], :errata => [], :rpms => [old_rpm.id] },
+                                  :dependency_solving => false)
+        assert_action_planned_with(action, ::Actions::Katello::Repository::MetadataGenerate, new_repo)
+      end
+
+      it 'keeps clone metadata enabled when repo is not in version changing multicopy map' do
+        pulp3_cvv_setup
+        ::Katello::Repository.any_instance.stubs(:soft_copy_of_library?).returns(false)
+        action.stubs(:pulp3_repo_mapping).returns({})
+        ::Actions::Katello::Repository::CloneToVersion.any_instance.expects(:plan).with do |repositories, _version, destination_repo, options|
+          repositories == [library_repo] &&
+            destination_repo == new_repo &&
+            options[:incremental] == true &&
+            options[:generate_metadata] == true
+        end
+
+        plan_action(action, content_view_version, [library], :resolve_dependencies => false, :content => {:package_ids => [old_rpm.id]})
+
+        refute_action_planned(action, ::Actions::Pulp3::Repository::MultiCopyUnits)
+        refute_action_planned(action, ::Actions::Katello::Repository::MetadataGenerate)
+      end
+
       it 'respects dep solving true' do
         pulp3_cvv_setup
         ::Katello::Repository.any_instance.stubs(:soft_copy_of_library?).returns(false)
@@ -124,6 +160,29 @@ module ::Actions::Katello::ContentViewVersion
                                   { :debs => [], :errata => [], :rpms => [old_rpm.id] },
                                   :dependency_solving => true)
         refute_action_planned(action, ::Actions::Pulp3::Repository::CopyContent)
+      end
+
+      it 'filters multicopy repo mapping to repos containing selected units' do
+        old_version = katello_content_view_versions(:library_view_version_2)
+        fedora_source = katello_repositories(:fedora_17_x86_64)
+        rhel_source = katello_repositories(:rhel_6_x86_64)
+        fedora_new_repo = ::Katello::Repository.new(library_instance_id: fedora_source.id, root: fedora_source.root)
+        rhel_new_repo = ::Katello::Repository.new(library_instance_id: rhel_source.id, root: rhel_source.root)
+        fedora_new_repo.id = 1001
+        rhel_new_repo.id = 1002
+
+        result = action.pulp3_repo_mapping(
+          {
+            [fedora_source] => fedora_new_repo,
+            [rhel_source] => rhel_new_repo
+          },
+          old_version,
+          { :errata => [], :debs => [], :rpms => [old_rpm.id] }
+        )
+
+        assert_equal [[fedora_source.id]], result.keys
+        assert_equal fedora_new_repo.id, result[[fedora_source.id]][:dest_repo]
+        refute result.key?([rhel_source.id])
       end
     end
   end
