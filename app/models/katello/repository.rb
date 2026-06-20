@@ -1015,6 +1015,32 @@ module Katello
       end
     end
 
+    def copy_filtered_indexed_data(source_repository, filter_ids: [], rpm_filenames: nil)
+      content_hrefs = source_repository.backend_service(SmartProxy.pulp_primary).content_unit_hrefs_for_source(
+        source_repository,
+        filter_ids: filter_ids,
+        rpm_filenames: rpm_filenames
+      )
+      hrefs_by_type = (content_hrefs[:by_type] || {}).with_indifferent_access
+
+      repository_type.content_types_to_index.each do |type|
+        filtered_hrefs = Array(hrefs_by_type[type.label])
+        type.model_class.copy_repository_associations_by_pulp_ids(source_repository, self, filtered_hrefs)
+      end
+
+      repository_type.index_additional_data_proc&.call(self, source_repository)
+    end
+
+    def merge_filtered_indexed_data(source_repository, hrefs_by_type)
+      hrefs_by_type = hrefs_by_type.with_indifferent_access
+      repository_type.content_types_to_index.each do |type|
+        filtered_hrefs = Array(hrefs_by_type[type.label])
+        next if filtered_hrefs.empty?
+
+        type.model_class.merge_repository_associations_by_pulp_ids(source_repository, self, filtered_hrefs)
+      end
+    end
+
     def index_linked_repo
       if (base_repo = self.target_repository)
         copy_indexed_data(base_repo)
@@ -1033,13 +1059,24 @@ module Katello
 
       full_index = options.fetch(:full_index, false)
       source_repository = options.fetch(:source_repository, nil)
+      filter_ids = Array(options.fetch(:filter_ids, []))
+      rpm_filenames = options[:rpm_filenames]
       if self.yum? && !self.primary?
         index_linked_repo
+      elsif source_repository && filter_ids.present? && !repository_type.unique_content_per_repo &&
+          source_repository.backend_service(SmartProxy.pulp_primary).respond_to?(:content_unit_hrefs_for_source)
+        copy_filtered_indexed_data(source_repository, filter_ids: filter_ids, rpm_filenames: rpm_filenames)
       elsif source_repository && !repository_type.unique_content_per_repo
         copy_indexed_data(source_repository)
       else
         repository_type.content_types_to_index.each do |type|
-          Katello::Logging.time("CONTENT_INDEX", data: {type: type.model_class}) do
+          Katello::Logging.time("CONTENT_INDEX", data: {
+                                  repository_id: id,
+                                  library_instance_id: library_instance_id,
+                                  source_repository_id: source_repository&.id,
+                                  optimized: !full_index,
+                                  type: type.model_class
+                                }) do
             Katello::ContentUnitIndexer.new(content_type: type, repository: self, optimized: !full_index).import_all
           end
         end

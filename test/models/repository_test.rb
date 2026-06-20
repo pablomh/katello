@@ -733,6 +733,33 @@ module Katello
       assert repo_types_hash[::Katello::ModuleStream.content_type] < repo_types_hash[::Katello::Erratum.content_type]
     end
 
+    def test_index_content_uses_filtered_additive_imports_for_single_source_filters
+      source_repo = katello_repositories(:fedora_17_x86_64)
+      service = Object.new
+      service.define_singleton_method(:content_unit_hrefs_for_source) do |_repo, _options|
+        {
+          by_type: {
+            rpm: ['/pulp/api/v3/content/rpm/packages/rpm-1/'],
+            module_stream: ['/pulp/api/v3/content/rpm/modulemds/module-1/'],
+            erratum: ['/pulp/api/v3/content/rpm/advisories/erratum-1/'],
+            package_group: ['/pulp/api/v3/content/rpm/packagegroups/group-1/'],
+            srpm: ['/pulp/api/v3/content/rpm/packages/srpm-1/']
+          }
+        }
+      end
+
+      @rhel6.stubs(:primary?).returns(true)
+      @rhel6.repository_type.stubs(:index_additional_data_proc).returns(nil)
+      source_repo.stubs(:backend_service).with(SmartProxy.pulp_primary).returns(service)
+      ::Katello::Rpm.expects(:copy_repository_associations_by_pulp_ids).with(source_repo, @rhel6, ['/pulp/api/v3/content/rpm/packages/rpm-1/'])
+      ::Katello::ModuleStream.expects(:copy_repository_associations_by_pulp_ids).with(source_repo, @rhel6, ['/pulp/api/v3/content/rpm/modulemds/module-1/'])
+      ::Katello::Erratum.expects(:copy_repository_associations_by_pulp_ids).with(source_repo, @rhel6, ['/pulp/api/v3/content/rpm/advisories/erratum-1/'])
+      ::Katello::PackageGroup.expects(:copy_repository_associations_by_pulp_ids).with(source_repo, @rhel6, ['/pulp/api/v3/content/rpm/packagegroups/group-1/'])
+      ::Katello::Srpm.expects(:copy_repository_associations_by_pulp_ids).with(source_repo, @rhel6, ['/pulp/api/v3/content/rpm/packages/srpm-1/'])
+
+      assert @rhel6.index_content(source_repository: source_repo, filter_ids: [123])
+    end
+
     def test_in_content_view
       view = katello_content_views(:library_view)
       rhel7 = katello_repositories(:rhel_7_no_arch)

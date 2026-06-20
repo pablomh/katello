@@ -10,13 +10,22 @@ module Actions
         # }
         def plan(repo_map, unit_map, options = {})
           if unit_map.values.flatten.any?
+            repo_context = repo_map.map do |source_repo_ids, dest_repo_map|
+              {
+                dest_repo_id: dest_repo_map[:dest_repo],
+                source_repository_ids: source_repo_ids,
+                base_repository_id: dest_repo_map[:base_repository_id]
+              }
+            end
             action_output = plan_self(repo_map: repo_map,
                       unit_map: unit_map,
                       dependency_solving: options[:dependency_solving],
                       incremental_update: options[:incremental_update],
                       smart_proxy_id: SmartProxy.pulp_primary.id).output
             plan_action(Pulp3::Repository::SaveVersions, repo_map.values.pluck(:dest_repo),
-                        tasks: action_output[:pulp_tasks]).output
+                        tasks: action_output[:pulp_tasks],
+                        repo_context: repo_context,
+                        unit_map: unit_map).output
           end
         end
 

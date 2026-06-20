@@ -85,9 +85,31 @@ module Katello
         delete_query = "delete from #{repository_association_class.table_name} where repository_id = #{dest_repo.id} and
                        #{unit_id_field} not in (select #{unit_id_field} from #{repository_association_class.table_name} where repository_id = #{source_repo.id})"
         ActiveRecord::Base.transaction do
-          ActiveRecord::Base.connection.execute(delete_query)
+          if repository_association_class.where(repository: dest_repo).exists?
+            ActiveRecord::Base.connection.execute(delete_query)
+          end
           self.repository_association_class.import(db_columns_copy, db_values_copy(source_repo, dest_repo), validate: false)
         end
+      end
+
+      def copy_repository_associations_by_pulp_ids(source_repo, dest_repo, pulp_ids)
+        delete_query = "delete from #{repository_association_class.table_name} where repository_id = #{dest_repo.id}"
+        ActiveRecord::Base.transaction do
+          ActiveRecord::Base.connection.execute(delete_query)
+          self.repository_association_class.import(
+            db_columns_copy,
+            db_values_copy_by_pulp_ids(source_repo, dest_repo, pulp_ids),
+            validate: false
+          )
+        end
+      end
+
+      def merge_repository_associations_by_pulp_ids(source_repo, dest_repo, pulp_ids)
+        self.repository_association_class.import(
+          db_columns_copy,
+          db_values_copy_by_pulp_ids(source_repo, dest_repo, pulp_ids),
+          validate: false
+        )
       end
 
       def db_columns_copy
@@ -117,6 +139,27 @@ module Katello
           db_values << values
         end
         db_values
+      end
+
+      def db_values_copy_by_pulp_ids(source_repo, dest_repo, pulp_ids)
+        unit_backend_identifier_field = backend_identifier_field
+        unit_identifier_field = unit_id_field
+        unit_prn_field = prn_identifier_field
+        source_units_for_pulp_ids(source_repo, pulp_ids).pluck(*db_columns_copy.reject { |column| column == :repository_id }).map do |values|
+          values = [values] unless values.is_a?(Array)
+          values.insert(db_columns_copy.index(:repository_id), dest_repo.id)
+          values
+        end
+      end
+
+      def source_units_for_pulp_ids(source_repo, pulp_ids)
+        scope = self.repository_association_class.where(repository: source_repo)
+        if backend_identifier_field
+          scope.where(backend_identifier_field => pulp_ids)
+        else
+          scope.joins("INNER JOIN #{table_name} on #{table_name}.id = #{repository_association_class.table_name}.#{unit_id_field}")
+               .where(table_name => { pulp_id: pulp_ids })
+        end
       end
 
       def installable_for_content_facet(facet, env = nil, content_view = nil)
