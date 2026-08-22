@@ -28,6 +28,7 @@ module Katello
         load "#{Katello::Engine.root}/db/seeds.d/104-proxy.rb"
 
         assert Feature.find_by_name('Pulpcore').present?
+        assert Feature.find_by_name('Pulpcore_Replicate').present?
       end
     end
 

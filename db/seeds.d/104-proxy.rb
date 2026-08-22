@@ -11,7 +11,7 @@ end
 
 User.as(::User.anonymous_api_admin.login) do
   # Proxy features
-  ["Pulpcore", "Container_Gateway"].each do |input|
+  ["Pulpcore", "Container_Gateway", "Pulpcore_Replicate"].each do |input|
     f = Feature.where(:name => input).first_or_create
     fail "Unable to create proxy feature: #{format_errors f}" if f.nil? || f.errors.any?
   end

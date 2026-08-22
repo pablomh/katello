@@ -499,6 +499,12 @@ Foreman::Plugin.register :katello do
         full_name: N_('Sync Smart Proxies after content view promotion'),
         description: N_("Whether or not to auto sync the Smart Proxies after a content view promotion.")
 
+      setting 'pulp_replicate_capsule_sync',
+        type: :boolean,
+        default: false,
+        full_name: N_('Replicate Capsule sync via Pulp'),
+        description: N_("Use pulpcore replicate() for yum and container Capsule syncs, per organization, when Capsule pulpcore is 3.113+ and the Pulpcore Replicate proxy feature is available. Other content types keep the classic per-repository sync.")
+
       setting 'download_rate_limit',
         type: :integer,
         default: 0,

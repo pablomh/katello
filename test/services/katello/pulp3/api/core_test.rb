@@ -78,6 +78,14 @@ module Katello
             PulpcoreClient::ImportersPulpImportsApi.expects(:new)
             core.import_api
           end
+
+          def test_ssl_configuration_accepts_net_http_persistent
+            config = mock('pulp_config')
+            config.expects(:ssl_ca_file=)
+            config.expects(:ssl_client_cert=).with(::Cert::Certs.ssl_client_cert)
+            config.expects(:ssl_client_key=).with(::Cert::Certs.ssl_client_key)
+            @primary.pulp3_ssl_configuration(config, :net_http_persistent)
+          end
         end
       end
     end
