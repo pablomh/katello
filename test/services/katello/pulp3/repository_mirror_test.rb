@@ -36,6 +36,30 @@ module Katello
           }
           assert_equal expected_options, @repo_mirror.remote_options
         end
+
+        def test_create_skips_when_repository_already_exists
+          existing = stub(:pulp_href => '/pulp/api/v3/repositories/rpm/rpm/1/')
+          api = mock
+          @repo_mirror.stubs(:api).returns(api)
+          @repo_mirror.stubs(:backend_object_name).returns('some_repo')
+          api.expects(:list_all).with(:name => 'some_repo').returns([existing])
+          api.expects(:repositories_api).never
+
+          assert_equal existing, @repo_mirror.create
+        end
+
+        def test_create_when_repository_is_missing
+          created = stub(:pulp_href => '/pulp/api/v3/repositories/rpm/rpm/2/')
+          api = mock
+          repos_api = mock
+          @repo_mirror.stubs(:api).returns(api)
+          @repo_mirror.stubs(:backend_object_name).returns('some_repo')
+          api.expects(:list_all).with(:name => 'some_repo').returns([])
+          api.expects(:repositories_api).returns(repos_api)
+          repos_api.expects(:create).with(:name => 'some_repo').returns(created)
+
+          assert_equal created, @repo_mirror.create
+        end
       end
     end
   end

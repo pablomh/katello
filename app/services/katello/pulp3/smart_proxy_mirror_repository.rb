@@ -6,16 +6,23 @@ module Katello
         @smart_proxy = smart_proxy
       end
 
+      def current_repositories(environment_id = nil, content_view_id = nil)
+        katello_repos = filtered_katello_repos(environment_id, content_view_id)
+        katello_repos.select { |repo| present_on_capsule?(repo) }
+      end
+
       def orphaned_repositories
         repo_map = {}
 
         smart_proxy_helper = ::Katello::SmartProxyHelper.new(smart_proxy)
-        katello_pulp_ids = smart_proxy_helper.combined_repos_available_to_capsule.map(&:pulp_id)
+        katello_repos = smart_proxy_helper.combined_repos_available_to_capsule
         pulp3_enabled_repo_types.each do |repo_type|
           api = repo_type.pulp3_api(smart_proxy)
+          distros = api.distributions_list_all
+          known_names = ::Katello::Pulp3::Replication::CapsuleInventory.known_names(katello_repos, distros)
           repos = api.list_all
           _, eligible_repos = partition_protected_orphan_cleanup(repos, 'repositories')
-          repo_map[api] = eligible_repos.reject { |capsule_repo| katello_pulp_ids.include? capsule_repo.name }
+          repo_map[api] = eligible_repos.reject { |capsule_repo| known_names.include?(capsule_repo.name) }
         end
 
         repo_map
@@ -61,7 +68,7 @@ module Katello
                                   # Searching distributions by repository version isn't supported
                                   api.distributions_list_all.select { |dist| dist.repository_version == href }
                                 end
-        repositories_to_redistribute = ::Katello::Repository.where(pulp_id: related_distributions.map(&:name))
+        repositories_to_redistribute = ::Katello::Pulp3::Replication::CapsuleInventory.matching_repositories(related_distributions)
         if repositories_to_redistribute.present?
           warning = "Completely resync (skip metadata check) repositories with the following paths to the smart proxy with ID #{smart_proxy.id}: " \
                     "#{repositories_to_redistribute.map(&:relative_path).join(', ')}. " \
@@ -119,22 +126,21 @@ module Katello
 
       def orphan_distributions(repo_type)
         api = repo_type.pulp3_api(smart_proxy)
+        inventory = ::Katello::Pulp3::Replication::CapsuleInventory.new(::Katello::Repository.where.not(:environment_id => nil))
         api.distributions_list_all.select do |distribution|
           dist = api.get_distribution(distribution.pulp_href)
           if self.class.orphan_cleanup_protected?(dist)
             log_protected_orphan_cleanup('distributions', [dist])
             false
           else
-            self.class.orphan_distribution?(dist)
+            self.class.orphan_distribution?(dist, inventory)
           end
         end
       end
 
-      def self.orphan_distribution?(distribution)
-        distribution.try(:publication).nil? &&
-            distribution.try(:repository).nil? &&
-            distribution.try(:repository_version).nil? ||
-            ::Katello::Repository.pluck(:pulp_id).exclude?(distribution.name)
+      def self.orphan_distribution?(distribution, inventory = nil)
+        inventory ||= ::Katello::Pulp3::Replication::CapsuleInventory.new(::Katello::Repository.where.not(:environment_id => nil))
+        !inventory.known_distribution?(distribution)
       end
 
       def delete_orphan_alternate_content_sources
@@ -170,19 +176,54 @@ module Katello
       def delete_orphan_remotes
         tasks = []
         smart_proxy_helper = ::Katello::SmartProxyHelper.new(smart_proxy)
-        repo_names = smart_proxy_helper.combined_repos_available_to_capsule.map(&:pulp_id)
+        katello_repos = smart_proxy_helper.combined_repos_available_to_capsule
         acs_remotes = Katello::SmartProxyAlternateContentSource.pluck(:remote_href)
         pulp3_enabled_repo_types.each do |repo_type|
           api = repo_type.pulp3_api(smart_proxy)
+          distros = api.distributions_list_all
+          known_names = ::Katello::Pulp3::Replication::CapsuleInventory.known_names(katello_repos, distros)
           _, eligible_remotes = partition_protected_orphan_cleanup(api.remotes_list_all(smart_proxy), 'remotes')
 
           eligible_remotes.each do |remote|
-            if !repo_names.include?(remote.name) && !acs_remotes.include?(remote.pulp_href)
+            if !known_names.include?(remote.name) && !acs_remotes.include?(remote.pulp_href)
               tasks << api.delete_remote(remote.pulp_href)
             end
           end
         end
         tasks
+      end
+
+      private
+
+      def filtered_katello_repos(environment_id, content_view_id)
+        katello_repos = Katello::Repository.all
+        katello_repos = katello_repos.where(:environment_id => environment_id) if environment_id
+        katello_repos = katello_repos.in_content_views([content_view_id]) if content_view_id
+        katello_repos.select { |repo| smart_proxy.pulp3_support?(repo) }
+      end
+
+      def present_on_capsule?(repo)
+        api = repo.repository_type.pulp3_api(smart_proxy)
+        type_id = repo.content_type
+        index = distro_index(type_id, api)
+        path = ::Katello::Pulp3::Replication.distribution_path_for(repo)
+        # Serving path is the presence signal. A leftover Pulp repository without a
+        # linked distribution is not "present": refresh_mirror_entities only patches
+        # remotes, so RefreshRepos must take the create_mirror_entities path.
+        index[:by_name][repo.pulp_id] || index[:by_path][path]
+      end
+
+      def distro_index(type_id, api)
+        @capsule_distro_index ||= {}
+        @capsule_distro_index[type_id] ||= begin
+          # refresh_mirror_entities only patches the remote, so an unlinked
+          # distribution must not count as "present" or the repo never gets created.
+          linked = api.distributions_list_all.select { |distro| ::Katello::Pulp3::Replication::CapsuleInventory.linked_to_repository?(distro) }
+          {
+            by_name: linked.each_with_object({}) { |distro, hash| hash[::Katello::Pulp3::Replication::CapsuleInventory.name_of(distro)] = true },
+            by_path: linked.each_with_object({}) { |distro, hash| hash[::Katello::Pulp3::Replication::CapsuleInventory.base_path_of(distro)] = true },
+          }
+        end
       end
     end
   end

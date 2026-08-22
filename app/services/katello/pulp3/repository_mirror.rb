@@ -53,6 +53,8 @@ module Katello
       end
 
       def create(_force = false)
+        existing = fetch_repository
+        return existing if existing
         api.repositories_api.create(name: backend_object_name)
       end
 

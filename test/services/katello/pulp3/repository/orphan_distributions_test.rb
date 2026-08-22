@@ -8,6 +8,7 @@ module Katello
 
       def setup
         @repo = FactoryBot.create(:katello_repository, :with_product)
+        @repo.update_column(:environment_id, katello_environments(:library).id)
       end
 
       def test_unknown_distribution_is_an_orphan
@@ -15,6 +16,14 @@ module Katello
           publication: 'http://some.href',
           name: 'other name')
         assert Katello::Pulp3::SmartProxyMirrorRepository.orphan_distribution?(dist)
+      end
+
+      def test_distribution_matched_by_base_path_is_not_an_orphan
+        dist = PulpFileClient::FileFileDistribution.new(
+          publication: 'http://some.href',
+          name: 'upstream-distro-name',
+          base_path: @repo.relative_path)
+        refute Katello::Pulp3::SmartProxyMirrorRepository.orphan_distribution?(dist)
       end
 
       def test_distribution_with_publication_is_not_an_orphan

@@ -34,6 +34,7 @@ module Katello
 
         smart_proxy_mirror_repo.expects(:pulp3_enabled_repo_types).once.returns([::Katello::RepositoryTypeManager.find(:yum)])
         ::Katello::SmartProxyHelper.any_instance.expects(:combined_repos_available_to_capsule).once.returns([fedora, rhel6])
+        ::Katello::Pulp3::Api::Yum.any_instance.expects(:distributions_list_all).once.returns([])
         ::Katello::Pulp3::Api::Yum.any_instance.expects(:remotes_list_all).once.returns(pulp_remotes)
         ::Katello::Pulp3::Api::Yum.any_instance.expects(:delete_remote).once.with(rhel7_href).returns('rhel-7-gone')
 
@@ -59,6 +60,7 @@ module Katello
         smart_proxy_mirror_repo.expects(:pulp3_enabled_repo_types).once.returns([::Katello::RepositoryTypeManager.find(:yum)])
         ::Katello::SmartProxyHelper.any_instance.expects(:combined_repos_available_to_capsule).once.returns([fedora, rhel6])
         ::Katello::RepositoryType.any_instance.expects(:pulp3_api).once.returns(api)
+        api.expects(:distributions_list_all).once.returns([])
         api.expects(:repositories_api).once.returns(repos_api)
         api.expects(:list_all).once.returns(pulp_repositories)
         repos_api.expects(:delete).once.with(rhel7_href).returns('rhel-7-gone')
@@ -82,6 +84,7 @@ module Katello
 
         smart_proxy_mirror_repo.expects(:pulp3_enabled_repo_types).once.returns([::Katello::RepositoryTypeManager.find(:yum)])
         ::Katello::SmartProxyHelper.any_instance.expects(:combined_repos_available_to_capsule).once.returns([fedora])
+        ::Katello::Pulp3::Api::Yum.any_instance.expects(:distributions_list_all).once.returns([])
         ::Katello::Pulp3::Api::Yum.any_instance.expects(:remotes_list_all).once.returns(pulp_remotes)
         ::Katello::Pulp3::Api::Yum.any_instance.expects(:delete_remote).once.with(orphan_remote_href).returns('orphan-gone')
 
@@ -101,11 +104,53 @@ module Katello
 
         smart_proxy_mirror_repo.expects(:pulp3_enabled_repo_types).once.returns([repo_type])
         repo_type.expects(:pulp3_api).with(proxy).once.returns(api)
+        api.expects(:distributions_list_all).once.returns([])
         api.expects(:list_all).once.returns([protected_repo, known_repo, orphan_repo])
         ::Katello::SmartProxyHelper.any_instance.expects(:combined_repos_available_to_capsule).once.returns([known_capsule_repo])
 
         result = smart_proxy_mirror_repo.orphaned_repositories
         assert_equal [orphan_repo], result[api]
+      end
+
+      def test_present_on_capsule_ignores_distribution_without_repository
+        proxy = smart_proxies(:four)
+        fedora = katello_repositories(:fedora_17_x86_64)
+        path = ::Katello::Pulp3::Replication.distribution_path_for(fedora)
+        smart_proxy_mirror_repo = ::Katello::Pulp3::SmartProxyMirrorRepository.new(proxy)
+
+        ::Katello::Pulp3::Api::Yum.any_instance.stubs(:distributions_list_all).returns(
+          [::PulpRpmClient::RpmRpmDistributionResponse.new(name: 'upstream-name', base_path: path)]
+        )
+        ::Katello::Pulp3::Api::Yum.any_instance.stubs(:list_all).returns([])
+
+        refute smart_proxy_mirror_repo.send(:present_on_capsule?, fedora)
+      end
+
+      def test_present_on_capsule_accepts_distribution_linked_to_repository
+        proxy = smart_proxies(:four)
+        fedora = katello_repositories(:fedora_17_x86_64)
+        path = ::Katello::Pulp3::Replication.distribution_path_for(fedora)
+        smart_proxy_mirror_repo = ::Katello::Pulp3::SmartProxyMirrorRepository.new(proxy)
+
+        ::Katello::Pulp3::Api::Yum.any_instance.stubs(:distributions_list_all).returns(
+          [::PulpRpmClient::RpmRpmDistributionResponse.new(name: 'upstream-name', base_path: path, repository: '/pulp/api/v3/repositories/rpm/rpm/1/')]
+        )
+        ::Katello::Pulp3::Api::Yum.any_instance.stubs(:list_all).returns([])
+
+        assert smart_proxy_mirror_repo.send(:present_on_capsule?, fedora)
+      end
+
+      def test_present_on_capsule_ignores_repository_without_distribution
+        proxy = smart_proxies(:four)
+        fedora = katello_repositories(:fedora_17_x86_64)
+        smart_proxy_mirror_repo = ::Katello::Pulp3::SmartProxyMirrorRepository.new(proxy)
+
+        ::Katello::Pulp3::Api::Yum.any_instance.stubs(:distributions_list_all).returns([])
+        ::Katello::Pulp3::Api::Yum.any_instance.stubs(:list_all).returns(
+          [PulpRpmClient::RpmRpmRepositoryResponse.new(name: fedora.pulp_id, pulp_href: '/pulp/api/v3/repositories/rpm/rpm/1/')]
+        )
+
+        refute smart_proxy_mirror_repo.send(:present_on_capsule?, fedora)
       end
     end
 
