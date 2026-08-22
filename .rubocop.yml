@@ -107,6 +107,10 @@ Style/FormatString:
 Style/GuardClause:
   Enabled: false # don't enforce this
 
+# lib/smart_proxy_pulpcore_replicate runs on Foreman Proxy (Sinatra, no ActiveSupport)
+Rails/Blank:
+  Exclude: ['lib/smart_proxy_pulpcore_replicate/**/*']
+
 Style/ClassVars:
   Enabled: True
   Exclude: ['test/**/*']

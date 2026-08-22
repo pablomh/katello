@@ -206,6 +206,7 @@ module Katello
 
       # Service extensions
       require "#{Katello::Engine.root}/lib/proxy_api/container_gateway"
+      require "#{Katello::Engine.root}/lib/proxy_api/pulpcore_replicate"
 
       # We need to explicitly load this files because Foreman has
       # similar strucuture and if the Foreman files are loaded first,
