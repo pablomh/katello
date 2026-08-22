@@ -234,7 +234,7 @@ module Katello
 
       def sync_url_params(_sync_options)
         params = {remote: repo.remote_href, mirror: repo.root.mirroring_policy == Katello::RootRepository::MIRRORING_POLICY_CONTENT}
-        params[:skip_types] = skip_types if (skip_types && repo.root.mirroring_policy != Katello::RootRepository::MIRRORING_POLICY_COMPLETE)
+        params[:skip_types] = skip_types if skip_types && repo.root.mirroring_policy != Katello::RootRepository::MIRRORING_POLICY_COMPLETE
         params
       end
 
@@ -285,8 +285,7 @@ module Katello
           create_distribution(relative_path)
         rescue api.client_module::ApiError => e
           # Now it seems there is a distribution. Fetch it and save the reference.
-          if e.message.include?("\"base_path\":[\"This field must be unique.\"]") ||
-              e.message.include?("\"base_path\":[\"Overlaps with existing distribution\"")
+          if ::Katello::Pulp3::DistributionConflict.create_race?(e)
             dist = lookup_distributions(base_path: repo.relative_path).first
             save_distribution_references([dist.pulp_href])
             return update_distribution
@@ -504,6 +503,8 @@ module Katello
           secured_distribution_options[:content_guard_prn] = content_guard.pulp_prn
         end
         secured_distribution_options.merge!(distribution_options(path))
+        secured_distribution_options[:pulp_labels] = ::Katello::Pulp3::DistributionLabels.for(repo)
+        secured_distribution_options
       end
 
       def ssl_remote_options
@@ -545,7 +546,7 @@ module Katello
       end
 
       def append_proxy_cacert(options)
-        if root.http_proxy&.cacert&.present? && options.key?(:ca_cert)
+        if root.http_proxy&.cacert.present? && options.key?(:ca_cert)
           options[:ca_cert] = [options[:ca_cert], root.http_proxy.cacert].compact.join("\n")
         end
         options

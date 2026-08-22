@@ -172,6 +172,16 @@ module Katello
             assert service.delete_version
           end
 
+          def test_secure_distribution_options_include_katello_labels
+            service = Katello::Pulp3::Repository::Yum.new(@repo, @proxy)
+            ::Katello::Pulp3::ContentGuard.stubs(:first).returns(stub(:pulp_href => '/guard', :pulp_prn => 'prn:guard'))
+            options = service.secure_distribution_options(@repo.relative_path)
+            labels = options[:pulp_labels]
+            assert_equal @repo.id.to_s, labels[::Katello::Pulp3::DistributionLabels::REPO_ID]
+            assert_equal 'yum', labels[::Katello::Pulp3::DistributionLabels::CONTENT_TYPE]
+            assert_equal @repo.organization.label, labels[::Katello::Pulp3::DistributionLabels::ORG]
+          end
+
           def test_common_remote_options
             service = Katello::Pulp3::Repository::Yum.new(@repo, @proxy)
             @repo.root.upstream_username = 'foo'

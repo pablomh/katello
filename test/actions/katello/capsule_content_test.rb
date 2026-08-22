@@ -251,6 +251,87 @@ module ::Actions::Katello::CapsuleContent
       assert_empty repos_in_dev
     end
 
+    it 'replicates yum even when classic sync history exists' do
+      with_pulp3_features(capsule_content.smart_proxy)
+      capsule_content.smart_proxy.add_lifecycle_environment(environment)
+      ::Katello::Pulp3::Replication.stubs(:capable?).returns(true)
+      repo = katello_repositories(:fedora_17_x86_64)
+      repo.root.update_attribute(:unprotected, true)
+      repo.create_smart_proxy_sync_history(capsule_content.smart_proxy)
+      repo.smart_proxy_sync_histories.update_all(:finished_at => Time.now)
+      tree = plan_action_tree(action_class, capsule_content.smart_proxy, :repository_id => repo.id)
+
+      refute_tree_planned(tree, ::Actions::Pulp3::CapsuleContent::Sync)
+      assert_tree_planned_with(tree, ::Actions::Pulp3::CapsuleContent::Replicate) do |input|
+        assert_includes input[:repository_ids], repo.id
+      end
+    end
+
+    it 'replicates yum instead of per-repo Capsule sync when capable' do
+      with_pulp3_features(capsule_content.smart_proxy)
+      capsule_content.smart_proxy.add_lifecycle_environment(environment)
+      ::Katello::Pulp3::Replication.stubs(:capable?).returns(true)
+      repo = katello_repositories(:fedora_17_x86_64)
+      repo.root.update_attribute(:unprotected, true)
+      tree = plan_action_tree(action_class, capsule_content.smart_proxy, :repository_id => repo.id)
+
+      refute_tree_planned(tree, ::Actions::Pulp3::Orchestration::Repository::RefreshRepos)
+      refute_tree_planned(tree, ::Actions::Pulp3::CapsuleContent::Sync)
+      refute_tree_planned(tree, Actions::Pulp3::CapsuleContent::RefreshDistribution)
+      assert_tree_planned_with(tree, ::Actions::Pulp3::CapsuleContent::Replicate) do |input|
+        assert_equal capsule_content.smart_proxy.id, input[:smart_proxy_id]
+        assert_includes input[:repository_ids], repo.id
+        assert_includes input[:q_select], 'katello_repo_id'
+      end
+    end
+
+    it 'replicates docker instead of per-repo Capsule sync when capable' do
+      with_pulp3_features(capsule_content.smart_proxy)
+      capsule_content.smart_proxy.add_lifecycle_environment(environment)
+      ::Katello::Pulp3::Replication.stubs(:capable?).returns(true)
+      repo = katello_repositories(:pulp3_docker_1)
+      tree = plan_action_tree(action_class, capsule_content.smart_proxy, :repository_id => repo.id)
+
+      refute_tree_planned(tree, ::Actions::Pulp3::CapsuleContent::Sync)
+      refute_tree_planned(tree, Actions::Pulp3::CapsuleContent::RefreshDistribution)
+      assert_tree_planned_with(tree, ::Actions::Pulp3::CapsuleContent::Replicate) do |input|
+        assert_includes input[:repository_ids], repo.id
+      end
+    end
+
+    it 'plans one Replicate per organization when replicable repos span organizations' do
+      with_pulp3_features(capsule_content.smart_proxy)
+      capsule_content.smart_proxy.add_lifecycle_environment(environment)
+      ::Katello::Pulp3::Replication.stubs(:capable?).returns(true)
+      repo = katello_repositories(:fedora_17_x86_64)
+      repo.root.update_attribute(:unprotected, true)
+      other_org = stub('other_org', :id => repo.root.organization_id + 1)
+      ::Katello::Pulp3::Replication.stubs(:group_by_org).returns([[repo.root.organization, [repo]], [other_org, [repo]]])
+
+      tree = plan_action_tree(action_class, capsule_content.smart_proxy, :repository_id => repo.id)
+
+      planned_orgs = []
+      assert_tree_planned_with(tree, ::Actions::Pulp3::CapsuleContent::Replicate) { |input| planned_orgs << input[:organization_id] }
+      assert_equal [repo.root.organization_id, other_org.id].sort, planned_orgs.sort
+    end
+
+    it 'keeps classic Capsule sync for file when replicate is capable' do
+      with_pulp3_features(capsule_content.smart_proxy)
+      capsule_content.smart_proxy.add_lifecycle_environment(environment)
+      ::Katello::Pulp3::Replication.stubs(:capable?).returns(true)
+      repo = katello_repositories(:pulp3_file_1)
+      repo.root.update_attribute(:unprotected, true)
+      tree = plan_action_tree(action_class, capsule_content.smart_proxy, :repository_id => repo.id)
+
+      refute_tree_planned(tree, ::Actions::Pulp3::CapsuleContent::Replicate)
+      assert_tree_planned_with(tree, ::Actions::Pulp3::CapsuleContent::Sync) do |input|
+        assert_equal repo.id, input[:repository_id]
+      end
+      assert_tree_planned_with(tree, Actions::Pulp3::CapsuleContent::RefreshDistribution) do |input|
+        assert_equal repo.id, input[:repository_id]
+      end
+    end
+
     it 'fails when trying to sync to the default capsule' do
       proxy = SmartProxy.pulp_primary
       proxy.stubs(:pulp_primary?).returns(true)
