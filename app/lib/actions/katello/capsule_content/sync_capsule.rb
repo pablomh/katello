@@ -2,7 +2,6 @@ module Actions
   module Katello
     module CapsuleContent
       class SyncCapsule < ::Actions::EntryAction
-        # rubocop:disable Metrics/MethodLength
         execution_plan_hooks.use :update_content_counts, :on => :success
         def plan(smart_proxy, options = {})
           plan_self(:smart_proxy_id => smart_proxy.id,
@@ -16,60 +15,84 @@ module Actions
           repository = options[:repository]
           skip_metadata_check = options.fetch(:skip_metadata_check, false)
           sequence do
-            repos = repos_to_sync(smart_proxy, environment, content_view, repository, skip_metadata_check)
+            candidate_repos = scoped_repositories(smart_proxy, environment, content_view, repository)
+            repos = apply_history_skip(smart_proxy, candidate_repos, skip_metadata_check)
             return nil if repos.empty?
 
             if environment.nil? && content_view.nil? && repository.nil?
               options[:repository_ids_list] = repos.pluck(:id)
             end
-            if smart_proxy.has_feature?(SmartProxy::PULP3_FEATURE)
-              plan_action(Actions::Pulp3::Orchestration::Repository::RefreshRepos, smart_proxy, options)
-            end
 
-            repos.in_groups_of(Setting[:foreman_proxy_content_batch_size], false) do |repo_batch|
-              concurrence do
-                repo_batch.each do |repo|
-                  if smart_proxy.pulp3_support?(repo)
-                    plan_action(Actions::Pulp3::CapsuleContent::Sync,
-                      repo, smart_proxy,
-                      skip_metadata_check: skip_metadata_check)
-                  end
+            plan_classic_sync(smart_proxy, repos, options, skip_metadata_check)
+            # Refresh distributions only for the repos selected for this run,
+            # and only after every sync batch, so newly visible content becomes
+            # available as one cutover step.
+            plan_distribution_cutover(smart_proxy, repos)
+          end
+        end
+
+        def plan_classic_sync(smart_proxy, repos, options, skip_metadata_check)
+          if smart_proxy.has_feature?(SmartProxy::PULP3_FEATURE)
+            plan_action(Actions::Pulp3::Orchestration::Repository::RefreshRepos, smart_proxy, options)
+          end
+
+          repos.in_groups_of(Setting[:foreman_proxy_content_batch_size], false) do |repo_batch|
+            concurrence do
+              repo_batch.each do |repo|
+                if smart_proxy.pulp3_support?(repo)
+                  plan_action(Actions::Pulp3::CapsuleContent::Sync,
+                    repo, smart_proxy,
+                    skip_metadata_check: skip_metadata_check)
                 end
               end
+            end
 
-              concurrence do
-                repo_batch.each do |repo|
-                  if repo.is_a?(::Katello::Repository) &&
-                      repo.distribution_bootable? &&
-                      repo.download_policy == ::Katello::RootRepository::DOWNLOAD_ON_DEMAND
-                    plan_action(Katello::Repository::FetchPxeFiles,
-                                id: repo.id,
-                                capsule_id: smart_proxy.id)
-                  end
-                end
+            plan_pxe_fetch(smart_proxy, repo_batch)
+          end
+        end
+
+        def plan_pxe_fetch(smart_proxy, repos)
+          concurrence do
+            Array(repos).each do |repo|
+              if repo.is_a?(::Katello::Repository) &&
+                  repo.distribution_bootable? &&
+                  repo.download_policy == ::Katello::RootRepository::DOWNLOAD_ON_DEMAND
+                plan_action(Katello::Repository::FetchPxeFiles,
+                            id: repo.id,
+                            capsule_id: smart_proxy.id)
               end
             end
           end
         end
-        # rubocop:enable Metrics/MethodLength
 
-        def repos_to_sync(smart_proxy, environment, content_view, repository, skip_metatadata_check = false)
+        def plan_distribution_cutover(smart_proxy, repos)
+          pulp3_repos = repos.select { |repo| smart_proxy.pulp3_support?(repo) }
+          return if pulp3_repos.empty?
+
+          plan_action(Actions::Pulp3::CapsuleContent::RefreshAllDistributions, smart_proxy, pulp3_repos)
+        end
+
+        def scoped_repositories(smart_proxy, environment, content_view, repository)
           smart_proxy_helper = ::Katello::SmartProxyHelper.new(smart_proxy)
           smart_proxy_helper.lifecycle_environment_check(environment, repository)
           if repository
-            if skip_metatadata_check || !repository.smart_proxy_sync_histories.where(:smart_proxy_id => smart_proxy).any? { |sph| !sph.finished_at.nil? }
-              [repository]
-            end
+            [repository]
           else
-            repositories = smart_proxy_helper.repositories_available_to_capsule(environment, content_view).by_rpm_count
-            repositories_to_skip = []
-            if skip_metatadata_check
-              smart_proxy_helper.clear_smart_proxy_sync_histories repositories
-            else
-              repositories_to_skip = ::Katello::Repository.synced_on_capsule smart_proxy
-            end
-            repositories - repositories_to_skip
+            smart_proxy_helper.repositories_available_to_capsule(environment, content_view).by_rpm_count
           end
+        end
+
+        def apply_history_skip(smart_proxy, repos, skip_metadata_check)
+          repos = Array(repos).compact
+          return repos if repos.empty?
+
+          if skip_metadata_check
+            ::Katello::SmartProxyHelper.new(smart_proxy).clear_smart_proxy_sync_histories(repos)
+            return repos
+          end
+
+          synced_repo_ids = ::Katello::SmartProxySyncHistory.synced_repository_ids_for(smart_proxy, repos)
+          repos.reject { |repo| synced_repo_ids.include?(repo.id) }
         end
 
         def update_content_counts(_execution_plan)

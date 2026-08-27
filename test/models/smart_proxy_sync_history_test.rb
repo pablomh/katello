@@ -10,6 +10,34 @@ module Katello
       @repo = katello_repositories(:rhel_6_x86_64)
     end
 
+    def test_synced_repository_ids_for_limits_to_candidates
+      candidate_repo = katello_repositories(:fedora_17_x86_64)
+      other_repo = katello_repositories(:fedora_17_unpublished)
+
+      @repo.create_smart_proxy_sync_history(proxy_with_pulp)
+      candidate_repo.create_smart_proxy_sync_history(proxy_with_pulp)
+      other_repo.create_smart_proxy_sync_history(proxy_with_pulp)
+
+      ::Katello::SmartProxySyncHistory.where(:repository_id => [@repo.id, candidate_repo.id, other_repo.id])
+                                      .update_all(:finished_at => Time.now)
+
+      synced_ids = ::Katello::SmartProxySyncHistory.synced_repository_ids_for(proxy_with_pulp, [@repo, candidate_repo])
+
+      assert_equal Set[@repo.id, candidate_repo.id], synced_ids
+    end
+
+    def test_synced_repository_ids_for_ignores_unfinished_history
+      candidate_repo = katello_repositories(:fedora_17_x86_64)
+
+      @repo.create_smart_proxy_sync_history(proxy_with_pulp)
+      candidate_repo.create_smart_proxy_sync_history(proxy_with_pulp)
+      @repo.smart_proxy_sync_histories.where(:smart_proxy_id => proxy_with_pulp.id).update_all(:finished_at => Time.now)
+
+      synced_ids = ::Katello::SmartProxySyncHistory.synced_repository_ids_for(proxy_with_pulp, [@repo, candidate_repo])
+
+      assert_equal Set[@repo.id], synced_ids
+    end
+
     def test_create_on_repo
       assert_equal @repo.smart_proxy_sync_histories.count, 0
       spsh_id = @repo.create_smart_proxy_sync_history proxy_with_pulp
