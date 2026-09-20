@@ -136,6 +136,7 @@ module ::Actions::Katello::Organization
       stub_action_locking!(action)
 
       plan_action(action, acme_org)
+      ::Katello::Resources::Candlepin::UpstreamCandlepinResource.expects(:reset_connection!)
       assert_difference 'Audit.count', 1 do
         finalize_action(action)
       end
@@ -228,6 +229,7 @@ module ::Actions::Katello::Organization
       acme_org.products.stubs(:redhat).returns([rhel7.product])
       stub_action_locking!(action)
       plan_action(action, acme_org, '/tmp/1234.zip', false)
+      ::Katello::Resources::Candlepin::UpstreamCandlepinResource.expects(:reset_connection!)
       assert_difference 'Audit.count', 1 do
         finalize_action(action)
       end
@@ -308,6 +310,7 @@ module ::Actions::Katello::Organization
 
       stub_action_locking!(action)
       plan_action(action, acme_org)
+      ::Katello::Resources::Candlepin::UpstreamCandlepinResource.expects(:reset_connection!)
       assert_difference 'Audit.count', 1 do
         finalize_action(action)
       end

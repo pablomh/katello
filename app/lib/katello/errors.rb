@@ -101,7 +101,8 @@ module Katello
       # Return a CandlepinError with the displayMessage
       # as the message set it
       def self.from_exception(exception)
-        error_data = MultiJson.load(exception.response)
+        response = exception.response
+        error_data = MultiJson.load(response.respond_to?(:body) ? response.body : response.to_s)
         if (display_message = error_data["displayMessage"])
           self.new(display_message).tap { |e| exception.set_backtrace(e.backtrace) }
         end

@@ -2,14 +2,18 @@ module Katello
   # rubocop:disable Metrics/ClassLength
   class Api::Rhsm::CandlepinProxiesController < Api::V2::ApiController
     include Katello::Authentication::ClientAuthentication
+    include Katello::Rhsm::RequestContext
+    include Katello::Rhsm::ProxyPassThrough
 
     IF_MODIFIED_SINCE_HEADER = 'If-Modified-Since'.freeze
+    X_CORRELATION_ID_HEADER = 'X-Correlation-ID'.freeze
 
     before_action :disable_strong_params
 
     wrap_parameters false
 
     around_action :repackage_message
+    before_action :use_forwarded_correlation_id
     before_action :find_host, :only => [:consumer_show, :consumer_destroy, :consumer_checkin, :enabled_repos,
                                         :regenerate_identity_certificates, :facts,
                                         :available_releases, :serials, :upload_tracer_profile]
@@ -42,7 +46,7 @@ module Katello
           if body_json['message'] && body_json['displayMessage'].nil?
             body_json['displayMessage'] = body_json['message']
           end
-          response.body = body_json.to_s
+          response.body = body_json.to_json
         rescue JSON::ParserError
           # Not a json response, leave as-is
         end
@@ -57,49 +61,6 @@ module Katello
       else
         render :plain => e.http_body, :status => e.http_code
       end
-    end
-
-    def proxy_request_path
-      @request_path = drop_api_namespace(@_request.fullpath)
-    end
-
-    def proxy_request_body
-      @request_body = @_request.body
-    end
-
-    def drop_api_namespace(original_request_path)
-      prefix = "/rhsm"
-      original_request_path.gsub(prefix, '')
-    end
-
-    def get
-      extra_headers = {}
-      modified_since = request.headers[IF_MODIFIED_SINCE_HEADER]
-      if modified_since.present?
-        extra_headers[IF_MODIFIED_SINCE_HEADER] = modified_since
-      end
-
-      r = Resources::Candlepin::Proxy.get(@request_path, extra_headers)
-      logger.debug filter_sensitive_data(r)
-      render :json => r, :status => r.code
-    end
-
-    def delete
-      r = Resources::Candlepin::Proxy.delete(@request_path, @request_body.read)
-      logger.debug filter_sensitive_data(r)
-      render :json => r
-    end
-
-    def post
-      r = Resources::Candlepin::Proxy.post(@request_path, @request_body.read)
-      logger.debug filter_sensitive_data(r)
-      render :json => r
-    end
-
-    def put
-      r = Resources::Candlepin::Proxy.put(@request_path, @request_body.read)
-      logger.debug filter_sensitive_data(r)
-      render :json => r
     end
 
     #api :GET, "/consumers/:id", N_("Show a system")
