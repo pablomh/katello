@@ -35,9 +35,31 @@ module Katello
         smart_proxy_mirror_repo.expects(:pulp3_enabled_repo_types).once.returns([::Katello::RepositoryTypeManager.find(:yum)])
         ::Katello::SmartProxyHelper.any_instance.expects(:combined_repos_available_to_capsule).once.returns([fedora, rhel6])
         ::Katello::Pulp3::Api::Yum.any_instance.expects(:remotes_list_all).once.returns(pulp_remotes)
+        ::Katello::Pulp3::Api::Yum.any_instance.expects(:distributions_list_all).once.returns([])
         ::Katello::Pulp3::Api::Yum.any_instance.expects(:delete_remote).once.with(rhel7_href).returns('rhel-7-gone')
 
         assert_equal ['rhel-7-gone'], smart_proxy_mirror_repo.delete_orphan_remotes
+      end
+
+      def test_delete_orphan_remotes_excludes_replicate_managed_remote
+        proxy = smart_proxies(:four)
+        fedora = katello_repositories(:fedora_17_x86_64)
+        orphan_href = '/orphan/href'
+        smart_proxy_mirror_repo = ::Katello::Pulp3::SmartProxyMirrorRepository.new(proxy)
+        ::Katello::SmartProxyAlternateContentSource.destroy_all
+
+        replicate_remote = PulpRpmClient::RpmRpmRemoteResponse.new(name: 'upstream-generated-name', pulp_href: '/replicated/href')
+        replicated_distribution = PulpRpmClient::RpmRpmDistributionResponse.new(
+          name: replicate_remote.name, pulp_labels: { 'katello_repo_id' => fedora.id.to_s })
+        orphan_remote = PulpRpmClient::RpmRpmRemoteResponse.new(name: 'orphan-remote', pulp_href: orphan_href)
+
+        smart_proxy_mirror_repo.expects(:pulp3_enabled_repo_types).once.returns([::Katello::RepositoryTypeManager.find(:yum)])
+        ::Katello::SmartProxyHelper.any_instance.expects(:combined_repos_available_to_capsule).once.returns([fedora])
+        ::Katello::Pulp3::Api::Yum.any_instance.expects(:remotes_list_all).once.returns([replicate_remote, orphan_remote])
+        ::Katello::Pulp3::Api::Yum.any_instance.expects(:distributions_list_all).once.returns([replicated_distribution])
+        ::Katello::Pulp3::Api::Yum.any_instance.expects(:delete_remote).once.with(orphan_href).returns('orphan-gone')
+
+        assert_equal ['orphan-gone'], smart_proxy_mirror_repo.delete_orphan_remotes
       end
 
       def test_delete_orphan_repositories
@@ -61,9 +83,33 @@ module Katello
         ::Katello::RepositoryType.any_instance.expects(:pulp3_api).once.returns(api)
         api.expects(:repositories_api).once.returns(repos_api)
         api.expects(:list_all).once.returns(pulp_repositories)
+        api.expects(:distributions_list_all).once.returns([])
         repos_api.expects(:delete).once.with(rhel7_href).returns('rhel-7-gone')
 
         assert_equal ['rhel-7-gone'], smart_proxy_mirror_repo.delete_orphan_repositories
+      end
+
+      def test_delete_orphan_repositories_excludes_replicate_managed_repo_matched_via_distribution_name
+        proxy = smart_proxies(:four)
+        fedora = katello_repositories(:fedora_17_x86_64)
+        orphan_href = '/orphan/href'
+        smart_proxy_mirror_repo = ::Katello::Pulp3::SmartProxyMirrorRepository.new(proxy)
+        api = mock
+        repos_api = mock
+
+        replicated_repo = PulpRpmClient::RpmRpmRepositoryResponse.new(name: 'upstream-generated-name', pulp_href: '/replicated/href')
+        replicated_distribution = PulpRpmClient::RpmRpmDistributionResponse.new(name: replicated_repo.name, base_path: 'irrelevant')
+        orphan_repo = PulpRpmClient::RpmRpmRepositoryResponse.new(name: 'orphan-repo', pulp_href: orphan_href)
+
+        smart_proxy_mirror_repo.expects(:pulp3_enabled_repo_types).once.returns([::Katello::RepositoryTypeManager.find(:yum)])
+        ::Katello::SmartProxyHelper.any_instance.expects(:combined_repos_available_to_capsule).once.returns([fedora])
+        ::Katello::RepositoryType.any_instance.expects(:pulp3_api).once.returns(api)
+        api.expects(:repositories_api).once.returns(repos_api)
+        api.expects(:list_all).once.returns([replicated_repo, orphan_repo])
+        api.expects(:distributions_list_all).once.returns([replicated_distribution.tap { |d| d.pulp_labels = { 'katello_repo_id' => fedora.id.to_s } }])
+        repos_api.expects(:delete).once.with(orphan_href).returns('orphan-gone')
+
+        assert_equal ['orphan-gone'], smart_proxy_mirror_repo.delete_orphan_repositories
       end
 
       def test_delete_orphan_remotes_skips_protected_label
@@ -102,7 +148,27 @@ module Katello
         smart_proxy_mirror_repo.expects(:pulp3_enabled_repo_types).once.returns([repo_type])
         repo_type.expects(:pulp3_api).with(proxy).once.returns(api)
         api.expects(:list_all).once.returns([protected_repo, known_repo, orphan_repo])
+        api.expects(:distributions_list_all).once.returns([])
         ::Katello::SmartProxyHelper.any_instance.expects(:combined_repos_available_to_capsule).once.returns([known_capsule_repo])
+
+        result = smart_proxy_mirror_repo.orphaned_repositories
+        assert_equal [orphan_repo], result[api]
+      end
+
+      def test_orphaned_repositories_excludes_replicate_managed_repo_matched_by_label
+        proxy = smart_proxies(:four)
+        fedora = katello_repositories(:fedora_17_x86_64)
+        smart_proxy_mirror_repo = ::Katello::Pulp3::SmartProxyMirrorRepository.new(proxy)
+        api = mock
+        repo_type = mock
+        replicated_repo = OpenStruct.new(name: 'upstream-generated-name', pulp_labels: { 'katello_repo_id' => fedora.id.to_s })
+        orphan_repo = OpenStruct.new(name: 'file-orphan', pulp_labels: nil)
+
+        smart_proxy_mirror_repo.expects(:pulp3_enabled_repo_types).once.returns([repo_type])
+        repo_type.expects(:pulp3_api).with(proxy).once.returns(api)
+        api.expects(:list_all).once.returns([replicated_repo, orphan_repo])
+        api.expects(:distributions_list_all).once.returns([])
+        ::Katello::SmartProxyHelper.any_instance.expects(:combined_repos_available_to_capsule).once.returns([fedora])
 
         result = smart_proxy_mirror_repo.orphaned_repositories
         assert_equal [orphan_repo], result[api]
@@ -280,8 +346,9 @@ module Katello
           repository: nil,
           repository_version: nil
         )
+        inventory = ::Katello::Pulp3::Replication::CapsuleInventory.new(smart_proxies(:four), [])
 
-        assert Katello::Pulp3::SmartProxyMirrorRepository.orphan_distribution?(dist)
+        assert Katello::Pulp3::SmartProxyMirrorRepository.orphan_distribution?(dist, inventory)
       end
     end
 
