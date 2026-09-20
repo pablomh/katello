@@ -15,6 +15,15 @@
 #   - ActiveSupport::Notifications "sql.active_record", Rails' own stable
 #     instrumentation hook, unrelated to any Katello-internal code shape.
 #
+# Puma runs multiple worker processes, each with its own memory, and the
+# reporting rake task runs in yet another separate process - so counters
+# can't just live in a local Hash. They accumulate locally per-process
+# (zero network cost in the hot path, which matters most for db_query:
+# a single registration can issue 1000+ queries) and flush the accumulated
+# delta to Redis periodically, since Redis is already this app's cache
+# backend. Every worker and the reporting task then read the same shared,
+# eventually-consistent totals.
+#
 # Enable with:      KATELLO_CANDLEPIN_PROFILING=1
 # Dump a report:    rake katello:candlepin_profiling:report
 # Reset counters:   rake katello:candlepin_profiling:reset
@@ -24,6 +33,9 @@
 if %w[1 true yes].include?(ENV['KATELLO_CANDLEPIN_PROFILING'].to_s.downcase)
   module Katello
     module CandlepinProfiling
+      BUCKETS = [:candlepin_http_request, :candlepin_http_request_restclient, :candlepin_http_request_pooled, :db_query].freeze
+      FLUSH_INTERVAL_SECONDS = 2
+
       Bucket = Struct.new(:requests, :total_seconds) do
         def initialize
           super(0, 0.0)
@@ -31,34 +43,60 @@ if %w[1 true yes].include?(ENV['KATELLO_CANDLEPIN_PROFILING'].to_s.downcase)
       end
 
       class << self
-        def buckets
-          @buckets ||= Hash.new { |h, k| h[k] = Bucket.new }
-        end
-
-        def mutex
-          @mutex ||= Mutex.new
-        end
-
         def record(bucket, seconds)
-          mutex.synchronize do
-            b = buckets[bucket]
+          local_mutex.synchronize do
+            b = local_buckets[bucket]
             b.requests += 1
             b.total_seconds += seconds
           end
+          flush! if due_for_flush?
         end
 
         def reset!
-          mutex.synchronize { buckets.clear }
+          local_mutex.synchronize { local_buckets.clear }
+          BUCKETS.each { |bucket| redis.del(count_key(bucket), seconds_key(bucket)) }
+        rescue StandardError => e
+          Rails.logger.debug { "[candlepin_profiling] reset failed: #{e.class}: #{e.message}" }
+        end
+
+        # Flushes this process's locally-accumulated deltas into the shared
+        # Redis counters. Safe to call from any process, including a
+        # reporting rake task (a no-op there, since it has nothing local
+        # to flush) - the point is that live Puma workers call this
+        # periodically so their totals are visible to everyone else.
+        def flush!
+          deltas = local_mutex.synchronize do
+            @last_flush_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            snapshot = local_buckets.dup
+            local_buckets.clear
+            snapshot
+          end
+
+          deltas.each do |bucket, b|
+            next if b.requests.zero?
+
+            redis.pipelined do |pipeline|
+              pipeline.incrby(count_key(bucket), b.requests)
+              pipeline.incrbyfloat(seconds_key(bucket), b.total_seconds)
+            end
+          end
+        rescue StandardError => e
+          Rails.logger.debug { "[candlepin_profiling] flush failed: #{e.class}: #{e.message}" }
         end
 
         def report
-          mutex.synchronize do
-            rows = buckets.map do |name, b|
-              avg_ms = b.requests.zero? ? 0 : (b.total_seconds / b.requests * 1000).round(2)
-              { bucket: name, count: b.requests, total_ms: (b.total_seconds * 1000).round(2), avg_ms: avg_ms }
-            end
-            rows.sort_by { |r| -r[:total_ms] }
+          flush!
+          rows = BUCKETS.filter_map do |bucket|
+            count = redis.get(count_key(bucket)).to_i
+            next if count.zero?
+
+            total_ms = redis.get(seconds_key(bucket)).to_f * 1000
+            { bucket: bucket, count: count, total_ms: total_ms.round(2), avg_ms: (total_ms / count).round(2) }
           end
+          rows.sort_by { |r| -r[:total_ms] }
+        rescue StandardError => e
+          Rails.logger.debug { "[candlepin_profiling] report failed: #{e.class}: #{e.message}" }
+          []
         end
 
         def log_report
@@ -81,6 +119,32 @@ if %w[1 true yes].include?(ENV['KATELLO_CANDLEPIN_PROFILING'].to_s.downcase)
           end
 
           host == @candlepin_host
+        end
+
+        private
+
+        def local_buckets
+          @local_buckets ||= Hash.new { |h, k| h[k] = Bucket.new }
+        end
+
+        def local_mutex
+          @local_mutex ||= Mutex.new
+        end
+
+        def due_for_flush?
+          Process.clock_gettime(Process::CLOCK_MONOTONIC) - (@last_flush_at ||= 0) >= FLUSH_INTERVAL_SECONDS
+        end
+
+        def redis
+          Rails.cache.redis
+        end
+
+        def count_key(bucket)
+          "candlepin_profiling:#{bucket}:count"
+        end
+
+        def seconds_key(bucket)
+          "candlepin_profiling:#{bucket}:seconds"
         end
       end
     end
@@ -134,7 +198,7 @@ if %w[1 true yes].include?(ENV['KATELLO_CANDLEPIN_PROFILING'].to_s.downcase)
     Katello::CandlepinProfiling.record(:db_query, event.duration / 1000.0)
   end
 
-  at_exit { Katello::CandlepinProfiling.log_report }
+  at_exit { Katello::CandlepinProfiling.flush! }
 
   Rails.logger.info("[candlepin_profiling] enabled - dump with `rake katello:candlepin_profiling:report`")
 end
