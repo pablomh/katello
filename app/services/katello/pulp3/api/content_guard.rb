@@ -30,8 +30,12 @@ module Katello
 
         def refresh
           found = list(name: default_name).results.first
-          if found && found.ca_certificate != ca_cert
-            partial_update(found.pulp_href)  # Still use pulp_href for API calls
+          if found
+            # Skip the write entirely when the cert already matches - avoids a
+            # guaranteed-to-fail create() (name already taken) plus its rescue-path
+            # re-list on every routine sync, matching UpstreamPulp#create_or_update's
+            # GET-then-write-only-if-different convention.
+            partial_update(found.pulp_href) if found.ca_certificate != ca_cert # Still use pulp_href for API calls
           else
             found = create
           end
@@ -40,12 +44,15 @@ module Katello
 
         def persist_if_needed(content_guard_obj)
           return if self.smart_proxy.pulp_mirror?
+          # create! (not create) so a concurrent insert under the unique index on `name`
+          # raises RecordNotUnique - active_record_retry then re-runs this whole block,
+          # re-finding the row the other caller just created and updating it instead.
           Katello::Util::Support.active_record_retry do
             found = Katello::Pulp3::ContentGuard.find_by(:name => default_name)
             if found
               found.update(pulp_href: content_guard_obj.pulp_href, pulp_prn: content_guard_obj.prn)
             else
-              Katello::Pulp3::ContentGuard.create(name: default_name, pulp_href: content_guard_obj.pulp_href, pulp_prn: content_guard_obj.prn)
+              Katello::Pulp3::ContentGuard.create!(name: default_name, pulp_href: content_guard_obj.pulp_href, pulp_prn: content_guard_obj.prn)
             end
           end
         end
