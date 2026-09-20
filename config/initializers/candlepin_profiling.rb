@@ -109,16 +109,22 @@ if %w[1 true yes].include?(ENV['KATELLO_CANDLEPIN_PROFILING'].to_s.downcase)
         # Only local Candlepin traffic is tracked - upstream Candlepin (manifest
         # import/refresh) hits a different host and is intentionally excluded so
         # it doesn't dilute the registration-path signal this is built to measure.
-        def candlepin_host?(host)
-          return false if host.blank?
+        # Matches on host and port, not host alone: other RestClient-speaking
+        # services (e.g. Pulp's content app) commonly share "localhost" with
+        # Candlepin in an all-in-one deployment.
+        def candlepin_request?(uri)
+          return false if uri.nil?
 
-          @candlepin_host ||= begin
-            URI.parse(SETTINGS.dig(:katello, :candlepin, :url).to_s).host
+          [uri.host, uri.port] == candlepin_endpoint
+        end
+
+        def candlepin_endpoint
+          @candlepin_endpoint ||= begin
+            uri = URI.parse(SETTINGS.dig(:katello, :candlepin, :url).to_s)
+            [uri.host, uri.port]
           rescue StandardError
             nil
           end
-
-          host == @candlepin_host
         end
 
         private
@@ -156,7 +162,7 @@ if %w[1 true yes].include?(ENV['KATELLO_CANDLEPIN_PROFILING'].to_s.downcase)
       super
     ensure
       elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
-      if Katello::CandlepinProfiling.candlepin_host?(uri&.host)
+      if Katello::CandlepinProfiling.candlepin_request?(uri)
         Katello::CandlepinProfiling.record(:candlepin_http_request, elapsed)
         Katello::CandlepinProfiling.record(:candlepin_http_request_restclient, elapsed)
       end
@@ -182,7 +188,7 @@ if %w[1 true yes].include?(ENV['KATELLO_CANDLEPIN_PROFILING'].to_s.downcase)
         super
       ensure
         elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
-        if Katello::CandlepinProfiling.candlepin_host?(uri&.host)
+        if Katello::CandlepinProfiling.candlepin_request?(uri)
           Katello::CandlepinProfiling.record(:candlepin_http_request, elapsed)
           Katello::CandlepinProfiling.record(:candlepin_http_request_pooled, elapsed)
         end
