@@ -45,7 +45,9 @@ module Katello
       environments = @smart_proxy.lifecycle_environments if environments.nil?
       repos = Katello::Repository.in_environment(environments)
       repos = repos.in_content_views([content_view]) if content_view
-      repos.smart_proxy_syncable
+      # Every caller (replicable_type?/effective_remote_download_policy/pulp3_support?)
+      # reads repo.root - preload it once here instead of once per repo per caller.
+      repos.smart_proxy_syncable.includes(:root)
     end
 
     def unsyncable_content_types
