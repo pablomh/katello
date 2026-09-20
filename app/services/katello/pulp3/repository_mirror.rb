@@ -53,7 +53,7 @@ module Katello
       end
 
       def create(_force = false)
-        api.repositories_api.create(name: backend_object_name)
+        fetch_repository || api.repositories_api.create(name: backend_object_name)
       end
 
       def update

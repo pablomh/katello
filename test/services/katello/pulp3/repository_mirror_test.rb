@@ -36,6 +36,32 @@ module Katello
           }
           assert_equal expected_options, @repo_mirror.remote_options
         end
+
+        def test_create_returns_existing_repository_without_creating
+          api = mock
+          repos_api = mock
+          existing = OpenStruct.new(name: 'some_repo')
+          @repo_service.stubs(:repo).returns(OpenStruct.new(pulp_id: 'some_repo'))
+          @repo_service.stubs(:api).returns(api)
+          api.expects(:list_all).with(name: 'some_repo').returns([existing])
+          api.stubs(:repositories_api).returns(repos_api)
+          repos_api.expects(:create).never
+
+          assert_equal existing, @repo_mirror.create
+        end
+
+        def test_create_creates_repository_when_absent
+          api = mock
+          repos_api = mock
+          created = OpenStruct.new(name: 'some_repo')
+          @repo_service.stubs(:repo).returns(OpenStruct.new(pulp_id: 'some_repo'))
+          @repo_service.stubs(:api).returns(api)
+          api.expects(:list_all).with(name: 'some_repo').returns([])
+          api.stubs(:repositories_api).returns(repos_api)
+          repos_api.expects(:create).with(name: 'some_repo').returns(created)
+
+          assert_equal created, @repo_mirror.create
+        end
       end
     end
   end
