@@ -60,8 +60,8 @@ module Katello
       end
 
       def process_response(resp)
-        logger.debug "Processing response: #{resp.code}"
-        logger.debug filter_sensitive_data(resp.body)
+        logger.debug { "Processing response: #{resp.code}" }
+        logger.debug { filter_sensitive_data(resp.body) }
         return resp unless resp.code.to_i >= 400
         parsed = {}
         message = "Rest exception while processing the call"
