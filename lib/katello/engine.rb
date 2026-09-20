@@ -126,6 +126,19 @@ module Katello
         require_dependency 'actions/middleware/record_errata_application'
         world.middleware.use ::Actions::Middleware::RecordErrataApplication
       end
+
+      # Opt-in profiling for comparing capsule sync approaches - see
+      # lib/katello/tasks/profile_capsule_sync.rake. Read once at boot so the
+      # instrumentation only exists when explicitly requested; restart the Dynflow
+      # executor after setting this to pick it up.
+      if ENV['KATELLO_PROFILE_CAPSULE_SYNC']
+        require_dependency 'katello/pulp3/api/core_profiling'
+        ::Katello::Pulp3::Api::Core.prepend(::Katello::Pulp3::Api::CoreProfiling)
+        ForemanTasks.dynflow.config.on_init(false) do |world|
+          require_dependency 'actions/middleware/profile_action'
+          world.middleware.use ::Actions::Middleware::ProfileAction
+        end
+      end
     end
 
     initializer "katello.load_app_instance_data" do |app|
