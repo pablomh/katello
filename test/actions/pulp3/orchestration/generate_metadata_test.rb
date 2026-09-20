@@ -34,7 +34,7 @@ module ::Actions::Pulp3
       @clone = katello_repositories(:generic_file_dev)
       assert_equal 1, Katello::Pulp3::DistributionReference.where(repository_id: @repo.id).count
       ensure_creatable(@clone, @primary)
-      @clone.create_smart_proxy_sync_history(proxy_with_pulp)
+      ::Katello::SmartProxySyncHistory.bulk_start(smart_proxy: proxy_with_pulp, repository_ids: [@clone.id])
       assert_equal @clone.smart_proxy_sync_histories.count, 1
       ForemanTasks.sync_task(::Actions::Pulp3::Orchestration::Repository::GenerateMetadata, @clone, @primary, source_repository: @repo)
       assert_equal @repo.publication_href, @clone.reload.publication_href

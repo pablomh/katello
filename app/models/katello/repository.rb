@@ -174,8 +174,8 @@ module Katello
     delegate :yum?, :docker?, :deb?, :file?, :ostree?, :ansible_collection?, :generic?, :to => :root
     delegate :name, :label, :docker_upstream_name, :url, :download_concurrency, :to => :root
 
-    delegate :name, :created_at, :updated_at, :major, :minor, :gpg_key_id, :gpg_key, :arch, :label, :url, :unprotected,
-             :content_type, :product_id, :checksum_type, :docker_upstream_name, :mirroring_policy,
+    delegate :created_at, :updated_at, :major, :minor, :gpg_key_id, :gpg_key, :arch, :unprotected,
+             :content_type, :product_id, :checksum_type, :mirroring_policy,
              :download_policy, :verify_ssl_on_sync, :"verify_ssl_on_sync?", :upstream_username, :upstream_password,
              :upstream_authentication_token, :deb_releases,
              :deb_components, :deb_architectures, :ssl_ca_cert_id, :ssl_ca_cert, :ssl_client_cert, :ssl_client_cert_id,
@@ -635,28 +635,12 @@ module Katello
       clone
     end
 
-    def self.synced_on_capsule(smart_proxy)
-      smart_proxy.smart_proxy_sync_histories.map { |sph| sph.repository unless sph.finished_at.nil? }
-    end
-
     def clear_smart_proxy_sync_histories(smart_proxy = nil)
       if smart_proxy
         self.smart_proxy_sync_histories.where(:smart_proxy_id => smart_proxy.id).try(:delete_all)
       else
         self.smart_proxy_sync_histories.delete_all
       end
-    end
-
-    def create_smart_proxy_sync_history(smart_proxy)
-      clear_smart_proxy_sync_histories(smart_proxy)
-      sp_history_args = {
-        :smart_proxy_id => smart_proxy.id,
-        :repository_id => self.id,
-        :started_at => Time.now,
-      }
-      sp_history = ::Katello::SmartProxySyncHistory.create sp_history_args
-      sp_history.save!
-      sp_history.id
     end
 
     def latest_sync_audit

@@ -166,14 +166,14 @@ module Katello
         { yum_repo.content_view_version.id.to_s =>
           { "repositories" =>
             { yum_repo.id.to_s => {
-              "metadata" => {
-                "env_id" => yum_repo.environment.id,
-                "library_instance_id" => yum_repo.library_instance_or_self.id,
-                "product_id" => yum_repo.product_id,
-                "content_type" => yum_repo.content_type,
+                "metadata" => {
+                  "env_id" => yum_repo.environment.id,
+                  "library_instance_id" => yum_repo.library_instance_or_self.id,
+                  "product_id" => yum_repo.product_id,
+                  "content_type" => yum_repo.content_type,
+                },
+                "counts" => { "erratum" => 4, "srpm" => 1, "rpm" => 31, "module_stream" => 7, "rpm.modulemd_defaults" => 3, "package_group" => 7, "rpm.packagecategory" => 1 },
               },
-              "counts" => { "erratum" => 4, "srpm" => 1, "rpm" => 31, "module_stream" => 7, "rpm.modulemd_defaults" => 3, "package_group" => 7, "rpm.packagecategory" => 1 },
-            },
               file_repo.id.to_s => {
                 "metadata" => {
                   "env_id" => file_repo.environment.id,
@@ -351,7 +351,7 @@ module Katello
       @proxy.lifecycle_environments = [file_repo.environment]
       ::Katello::SmartProxyHelper.any_instance.expects(:repositories_available_to_capsule)
                                  .returns(repos)
-      file_repo.create_smart_proxy_sync_history(@proxy)
+      ::Katello::SmartProxySyncHistory.bulk_start(smart_proxy: @proxy, repository_ids: [file_repo.id])
       assert_equal 1, @proxy.smart_proxy_sync_histories.count
       @proxy.remove_lifecycle_environment(file_repo.environment)
       assert_equal 0, @proxy.smart_proxy_sync_histories.count
