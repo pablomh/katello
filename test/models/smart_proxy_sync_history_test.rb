@@ -14,9 +14,10 @@ module Katello
       candidate_repo = katello_repositories(:fedora_17_x86_64)
       other_repo = katello_repositories(:fedora_17_unpublished)
 
-      @repo.create_smart_proxy_sync_history(proxy_with_pulp)
-      candidate_repo.create_smart_proxy_sync_history(proxy_with_pulp)
-      other_repo.create_smart_proxy_sync_history(proxy_with_pulp)
+      ::Katello::SmartProxySyncHistory.bulk_start(
+        smart_proxy: proxy_with_pulp,
+        repository_ids: [@repo.id, candidate_repo.id, other_repo.id]
+      )
 
       ::Katello::SmartProxySyncHistory.where(:repository_id => [@repo.id, candidate_repo.id, other_repo.id])
                                       .update_all(:finished_at => Time.now)
@@ -29,8 +30,10 @@ module Katello
     def test_synced_repository_ids_for_ignores_unfinished_history
       candidate_repo = katello_repositories(:fedora_17_x86_64)
 
-      @repo.create_smart_proxy_sync_history(proxy_with_pulp)
-      candidate_repo.create_smart_proxy_sync_history(proxy_with_pulp)
+      ::Katello::SmartProxySyncHistory.bulk_start(
+        smart_proxy: proxy_with_pulp,
+        repository_ids: [@repo.id, candidate_repo.id]
+      )
       @repo.smart_proxy_sync_histories.where(:smart_proxy_id => proxy_with_pulp.id).update_all(:finished_at => Time.now)
 
       synced_ids = ::Katello::SmartProxySyncHistory.synced_repository_ids_for(proxy_with_pulp, [@repo, candidate_repo])
@@ -38,24 +41,45 @@ module Katello
       assert_equal Set[@repo.id], synced_ids
     end
 
-    def test_create_on_repo
+    def test_bulk_start_creates_history_for_a_single_repo
       assert_equal @repo.smart_proxy_sync_histories.count, 0
-      spsh_id = @repo.create_smart_proxy_sync_history proxy_with_pulp
+      spsh_ids = ::Katello::SmartProxySyncHistory.bulk_start(smart_proxy: proxy_with_pulp, repository_ids: [@repo.id])
       assert_equal @repo.smart_proxy_sync_histories.count, 1
-      repo_spsh = ::Katello::SmartProxySyncHistory.find(spsh_id)
+      repo_spsh = ::Katello::SmartProxySyncHistory.find(spsh_ids.first)
       assert_equal repo_spsh.smart_proxy_id, proxy_with_pulp.id
       assert_equal repo_spsh.repository_id, @repo.id
     end
 
+    def test_bulk_start_replaces_existing_history_for_each_repo
+      candidate_repo = katello_repositories(:fedora_17_x86_64)
+
+      first_ids = ::Katello::SmartProxySyncHistory.bulk_start(
+        smart_proxy: proxy_with_pulp,
+        repository_ids: [@repo.id, candidate_repo.id]
+      )
+      second_ids = ::Katello::SmartProxySyncHistory.bulk_start(
+        smart_proxy: proxy_with_pulp,
+        repository_ids: [candidate_repo.id, @repo.id]
+      )
+
+      assert_equal 2, ::Katello::SmartProxySyncHistory.where(
+        :smart_proxy_id => proxy_with_pulp.id,
+        :repository_id => [@repo.id, candidate_repo.id]
+      ).count
+      assert_equal [candidate_repo.id, @repo.id].sort,
+                   ::Katello::SmartProxySyncHistory.where(:id => second_ids).pluck(:repository_id).sort
+      assert_empty(first_ids & second_ids)
+    end
+
     def test_clear_on_repo
-      @repo.create_smart_proxy_sync_history proxy_with_pulp
+      ::Katello::SmartProxySyncHistory.bulk_start(smart_proxy: proxy_with_pulp, repository_ids: [@repo.id])
       assert_equal @repo.smart_proxy_sync_histories.count, 1
       @repo.clear_smart_proxy_sync_histories
       assert_equal @repo.smart_proxy_sync_histories.count, 0
     end
 
     def test_repo_smart_proxy_history_unique
-      @repo.create_smart_proxy_sync_history proxy_with_pulp
+      ::Katello::SmartProxySyncHistory.bulk_start(smart_proxy: proxy_with_pulp, repository_ids: [@repo.id])
       assert_equal @repo.smart_proxy_sync_histories.count, 1
       sp_history_args = {
         :smart_proxy_id => proxy_with_pulp.id,
@@ -69,11 +93,11 @@ module Katello
 
     def test_clear_history_on_smart_proxy
       smart_proxy_helper = ::Katello::SmartProxyHelper.new(proxy_with_pulp)
-      @repo.create_smart_proxy_sync_history proxy_with_pulp
+      ::Katello::SmartProxySyncHistory.bulk_start(smart_proxy: proxy_with_pulp, repository_ids: [@repo.id])
       assert_equal @repo.smart_proxy_sync_histories.count, 1
       smart_proxy_helper.clear_smart_proxy_sync_histories [@repo]
       assert_equal @repo.smart_proxy_sync_histories.count, 0
-      @repo.create_smart_proxy_sync_history proxy_with_pulp
+      ::Katello::SmartProxySyncHistory.bulk_start(smart_proxy: proxy_with_pulp, repository_ids: [@repo.id])
       assert_equal @repo.smart_proxy_sync_histories.count, 1
       smart_proxy_helper.clear_smart_proxy_sync_histories
       assert_equal @repo.smart_proxy_sync_histories.count, 0
@@ -82,7 +106,7 @@ module Katello
     def test_clear_history_on_publish_repositories
       User.current = users(:admin)
       busybox = katello_repositories(:busybox)
-      busybox.create_smart_proxy_sync_history(proxy_with_pulp)
+      ::Katello::SmartProxySyncHistory.bulk_start(smart_proxy: proxy_with_pulp, repository_ids: [busybox.id])
       library = katello_environments(:library)
       library.expects(:repositories).returns(::Katello::Repository.where(id: busybox.id))
       ::Actions::Katello::Environment::PublishContainerRepositories.any_instance.expects(:plan_action).twice

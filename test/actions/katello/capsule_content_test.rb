@@ -110,7 +110,7 @@ module ::Actions::Katello::CapsuleContent
       capsule_content.smart_proxy.add_lifecycle_environment(environment)
       repo = katello_repositories(:fedora_17_x86_64)
       repo.root.update_attribute(:unprotected, true)
-      repo.create_smart_proxy_sync_history(capsule_content.smart_proxy)
+      ::Katello::SmartProxySyncHistory.bulk_start(smart_proxy: capsule_content.smart_proxy, repository_ids: [repo.id])
       repo.smart_proxy_sync_histories.where(:smart_proxy_id => capsule_content.smart_proxy.id).update_all(:finished_at => Time.now)
 
       tree = plan_action_tree(action_class, capsule_content.smart_proxy, :repository_id => repo.id)
@@ -279,6 +279,244 @@ module ::Actions::Katello::CapsuleContent
       capsule_content.smart_proxy.lifecycle_environments = []
       action = plan_action_tree(action_class, capsule_content.smart_proxy, :environment_id => staging_environment.id)
       refute_empty action.errors
+    end
+  end
+
+  class SyncCapsuleTest < TestBase
+    let(:action_class) { ::Actions::Katello::CapsuleContent::SyncCapsule }
+
+    it 'routes a replicate()-eligible repo through Replicate, grouped by organization' do
+      ::Katello::Pulp3::Replication.stubs(:capable?).returns(true)
+      with_pulp3_features(capsule_content.smart_proxy)
+      capsule_content.smart_proxy.add_lifecycle_environment(environment)
+      repo = katello_repositories(:fedora_17_x86_64)
+      repo.root.update_attribute(:unprotected, true)
+
+      tree = plan_action_tree(action_class, capsule_content.smart_proxy, :environment => environment)
+
+      assert_tree_planned_with(tree, ::Actions::Pulp3::CapsuleContent::Replicate) do |input|
+        assert_equal capsule_content.smart_proxy.id, input[:smart_proxy_id]
+        assert_equal repo.organization.id, input[:organization_id]
+      end
+      refute_tree_planned(tree, ::Actions::Pulp3::CapsuleContent::Sync)
+    end
+
+    it 'keeps a repo on classic sync when the capsule is not replicate()-capable' do
+      ::Katello::Pulp3::Replication.stubs(:capable?).returns(false)
+      with_pulp3_features(capsule_content.smart_proxy)
+      capsule_content.smart_proxy.add_lifecycle_environment(environment)
+      repo = katello_repositories(:fedora_17_x86_64)
+      repo.root.update_attribute(:unprotected, true)
+
+      tree = plan_action_tree(action_class, capsule_content.smart_proxy, :environment => environment)
+
+      refute_tree_planned(tree, ::Actions::Pulp3::CapsuleContent::Replicate)
+      assert_tree_planned_steps(tree, ::Actions::Pulp3::CapsuleContent::Sync)
+    end
+
+    it 'keeps a repo on classic sync when the capsule lacks the matching pulp3 plugin' do
+      ::Katello::Pulp3::Replication.stubs(:capable?).returns(true)
+      with_pulp3_features(capsule_content.smart_proxy)
+      capsule_content.smart_proxy.stubs(:capabilities).returns([])
+      capsule_content.smart_proxy.add_lifecycle_environment(environment)
+      repo = katello_repositories(:fedora_17_x86_64)
+      repo.root.update_attribute(:unprotected, true)
+
+      tree = plan_action_tree(action_class, capsule_content.smart_proxy, :environment => environment)
+
+      refute_tree_planned(tree, ::Actions::Pulp3::CapsuleContent::Replicate)
+    end
+
+    it 'falls back protected content to classic sync when pulpcore lacks remote transport support' do
+      ::Katello::Pulp3::Replication.stubs(:capable?).returns(true)
+      ::Katello::Pulp3::Replication.stubs(:protected_replicate_capable?).returns(false)
+      with_pulp3_features(capsule_content.smart_proxy)
+      capsule_content.smart_proxy.add_lifecycle_environment(environment)
+      repo = katello_repositories(:fedora_17_x86_64)
+      repo.root.update_attribute(:unprotected, false)
+
+      tree = plan_action_tree(action_class, capsule_content.smart_proxy, :environment => environment)
+
+      refute_tree_planned(tree, ::Actions::Pulp3::CapsuleContent::Replicate)
+      assert_tree_planned_steps(tree, ::Actions::Pulp3::CapsuleContent::Sync)
+    end
+
+    it 'scopes repository_ids to the capsule\'s full assigned repos and allows pruning for a routine, unscoped capsule sync' do
+      ::Katello::Pulp3::Replication.stubs(:capable?).returns(true)
+      with_pulp3_features(capsule_content.smart_proxy)
+      capsule_content.smart_proxy.add_lifecycle_environment(environment)
+      repo = katello_repositories(:fedora_17_x86_64)
+      repo.root.update_attribute(:unprotected, true)
+
+      tree = plan_action_tree(action_class, capsule_content.smart_proxy)
+
+      assert_tree_planned_with(tree, ::Actions::Pulp3::CapsuleContent::Replicate) do |input|
+        assert_includes input[:repository_ids], repo.id
+        assert_equal ::Katello::Pulp3::Replication.effective_remote_download_policy(capsule_content.smart_proxy, repo),
+                     input[:remote_download_policy]
+        assert input[:prune]
+      end
+    end
+
+    it 'scopes repository_ids to the requested repository and disallows pruning when the sync is explicitly repo-scoped' do
+      ::Katello::Pulp3::Replication.stubs(:capable?).returns(true)
+      with_pulp3_features(capsule_content.smart_proxy)
+      capsule_content.smart_proxy.add_lifecycle_environment(environment)
+      repo = katello_repositories(:fedora_17_x86_64)
+      repo.root.update_attribute(:unprotected, true)
+
+      tree = plan_action_tree(action_class, capsule_content.smart_proxy, :repository => repo, :environment => environment)
+
+      assert_tree_planned_with(tree, ::Actions::Pulp3::CapsuleContent::Replicate) do |input|
+        assert_equal [repo.id], input[:repository_ids]
+        refute input[:prune]
+      end
+    end
+
+    it 'disables prune for routine syncs when one organization splits across multiple replicate policies' do
+      ::Katello::Pulp3::Replication.stubs(:capable?).returns(true)
+      with_pulp3_features(capsule_content.smart_proxy)
+
+      repo_one = katello_repositories(:fedora_17_x86_64)
+      repo_two = katello_repositories(:fedora_17_x86_64_dev)
+      repo_one.root.update_attribute(:unprotected, true)
+      repo_two.root.update_attribute(:unprotected, true)
+
+      action_class.any_instance.stubs(:scoped_repositories).returns([repo_one, repo_two])
+      ::Katello::Pulp3::Replication.stubs(:replicable_repos_for).returns([[repo_one, repo_two], []])
+      ::Katello::Pulp3::Replication.stubs(:group_by_org_and_policy).returns(
+        [repo_one.organization, 'immediate'] => [repo_one],
+        [repo_one.organization, 'on_demand'] => [repo_two]
+      )
+
+      tree = plan_action_tree(action_class, capsule_content.smart_proxy)
+
+      planned_prunes = []
+      assert_tree_planned_with(tree, ::Actions::Pulp3::CapsuleContent::Replicate) do |input|
+        planned_prunes << input[:prune]
+      end
+
+      assert_equal [false, false], planned_prunes.sort
+    end
+
+    it 'batches PXE fetch for the replicate path using foreman_proxy_content_batch_size' do
+      ::Katello::Pulp3::Replication.stubs(:capable?).returns(true)
+      with_pulp3_features(capsule_content.smart_proxy)
+
+      repo_one = katello_repositories(:fedora_17_x86_64)
+      repo_two = katello_repositories(:fedora_17_x86_64_dev)
+      repo_one.root.update_attribute(:unprotected, true)
+      repo_two.root.update_attribute(:unprotected, true)
+
+      action_class.any_instance.stubs(:scoped_repositories).returns([repo_one, repo_two])
+      ::Katello::Pulp3::Replication.stubs(:replicable_repos_for).returns([[repo_one, repo_two], []])
+
+      batches = []
+      action_class.any_instance.stubs(:plan_pxe_fetch).with do |_smart_proxy, repos|
+        batches << Array(repos)
+        true
+      end
+
+      Setting[:foreman_proxy_content_batch_size] = 1
+      plan_action_tree(action_class, capsule_content.smart_proxy)
+
+      assert_equal [1, 1], batches.map(&:size).sort
+    end
+  end
+
+  class ReplicateTest < TestBase
+    let(:action_class) { ::Actions::Pulp3::CapsuleContent::Replicate }
+    let(:organization) { get_organization }
+
+    it 'plans with the smart proxy and organization ids' do
+      action = plan_action(create_action(action_class), capsule_content.smart_proxy, organization, force_sync: true)
+      assert_equal capsule_content.smart_proxy.id, action.input[:smart_proxy_id]
+      assert_equal organization.id, action.input[:organization_id]
+      assert action.input[:force_sync]
+    end
+
+    it 'creates/updates the upstream pulp record and triggers replicate' do
+      ::Katello::Pulp3::Replication.expects(:ensure_upstream_pulp!).
+        with { |api, org| api.is_a?(::Katello::Pulp3::Api::UpstreamPulp) && api.smart_proxy == capsule_content.smart_proxy && org == organization }.
+        returns('/pulp/api/v3/upstream-pulps/abc/')
+      ::Katello::Pulp3::Api::UpstreamPulp.any_instance.expects(:replicate).
+        with('/pulp/api/v3/upstream-pulps/abc/', replication_request_matching(
+          repository_ids: nil, force_sync: false, prune: true, remote_policy: nil,
+          protected_base_paths: [], content_guard_href: nil
+        )).
+        returns(OpenStruct.new(task_group: '/pulp/api/v3/task-groups/123/'))
+
+      action = create_action(action_class)
+      plan_action(action, capsule_content.smart_proxy, organization)
+      action.invoke_external_task
+
+      assert_equal '/pulp/api/v3/task-groups/123/', action.output[:task_groups].first.href
+    end
+
+    it 'forwards repository_ids to replicate when the plan is scoped' do
+      ::Katello::Pulp3::Replication.stubs(:ensure_upstream_pulp!).
+        returns('/pulp/api/v3/upstream-pulps/abc/')
+      ::Katello::Pulp3::Api::UpstreamPulp.any_instance.expects(:replicate).
+        with('/pulp/api/v3/upstream-pulps/abc/', replication_request_matching(
+          repository_ids: [1], force_sync: false, prune: true, remote_policy: nil,
+          protected_base_paths: [], content_guard_href: nil
+        )).
+        returns(OpenStruct.new(task_group: '/pulp/api/v3/task-groups/123/'))
+
+      action = create_action(action_class)
+      plan_action(action, capsule_content.smart_proxy, organization, repository_ids: [1])
+      action.invoke_external_task
+    end
+
+    it 'forwards prune to replicate' do
+      ::Katello::Pulp3::Replication.stubs(:ensure_upstream_pulp!).
+        returns('/pulp/api/v3/upstream-pulps/abc/')
+      ::Katello::Pulp3::Api::UpstreamPulp.any_instance.expects(:replicate).
+        with('/pulp/api/v3/upstream-pulps/abc/', replication_request_matching(
+          repository_ids: nil, force_sync: false, prune: false, remote_policy: nil,
+          protected_base_paths: [], content_guard_href: nil
+        )).
+        returns(OpenStruct.new(task_group: '/pulp/api/v3/task-groups/123/'))
+
+      action = create_action(action_class)
+      plan_action(action, capsule_content.smart_proxy, organization, prune: false)
+      action.invoke_external_task
+    end
+
+    it 'forwards policy and protected content guard details to replicate' do
+      with_pulp3_features(capsule_content.smart_proxy)
+      repo = katello_repositories(:fedora_17_x86_64)
+      repo.root.update_attribute(:unprotected, false)
+      content_guard = OpenStruct.new(pulp_href: '/pulp/api/v3/contentguards/certguard/rhsm/1/')
+
+      ::Katello::Pulp3::Replication.expects(:ensure_upstream_pulp!).
+        with { |_api, org| org == organization }.
+        returns('/pulp/api/v3/upstream-pulps/abc/')
+      ::Katello::Pulp3::Api::ContentGuard.any_instance.expects(:refresh).returns(content_guard)
+      ::Katello::Pulp3::Api::UpstreamPulp.any_instance.expects(:replicate).
+        with('/pulp/api/v3/upstream-pulps/abc/', replication_request_matching(
+          repository_ids: [repo.id],
+          force_sync: false,
+          prune: true,
+          remote_policy: 'immediate',
+          protected_base_paths: [repo.relative_path],
+          content_guard_href: content_guard.pulp_href
+        )).
+        returns(OpenStruct.new(task_group: '/pulp/api/v3/task-groups/123/'))
+
+      action = create_action(action_class)
+      plan_action(action, capsule_content.smart_proxy, organization,
+                  repository_ids: [repo.id], remote_download_policy: 'immediate')
+      action.invoke_external_task
+    end
+
+    private
+
+    def replication_request_matching(expected_payload)
+      satisfies do |request|
+        request.is_a?(::Katello::Pulp3::Replication::Request) &&
+          request.to_h == expected_payload
+      end
     end
   end
 end

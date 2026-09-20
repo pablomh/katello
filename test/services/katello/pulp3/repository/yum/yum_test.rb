@@ -113,6 +113,13 @@ module Katello
             assert_equal 'sha256', publication_options[:checksum_type]
           end
 
+          def test_secure_distribution_options_include_replication_labels
+            service = Katello::Pulp3::Repository::Yum.new(@repo, @proxy)
+
+            assert_equal ::Katello::Pulp3::DistributionLabels.for(@repo),
+                         service.secure_distribution_options(@repo.relative_path)[:pulp_labels]
+          end
+
           def test_refresh_distributions_distribution_ref_wrong
             service = @repo.backend_service(@proxy)
             service.stubs(:lookup_distributions).returns([PulpRpmClient::RpmRpmDistributionResponse.new(pulp_href: 'some fake href')])

@@ -231,7 +231,7 @@ module Katello
 
       def sync_url_params(_sync_options)
         params = {remote: repo.remote_href, mirror: repo.root.mirroring_policy == Katello::RootRepository::MIRRORING_POLICY_CONTENT}
-        params[:skip_types] = skip_types if (skip_types && repo.root.mirroring_policy != Katello::RootRepository::MIRRORING_POLICY_COMPLETE)
+        params[:skip_types] = skip_types if skip_types && repo.root.mirroring_policy != Katello::RootRepository::MIRRORING_POLICY_COMPLETE
         params
       end
 
@@ -499,6 +499,7 @@ module Katello
           secured_distribution_options[:content_guard] = content_guard.pulp_href
           secured_distribution_options[:content_guard_prn] = content_guard.pulp_prn
         end
+        secured_distribution_options[:pulp_labels] = ::Katello::Pulp3::DistributionLabels.for(repo)
         secured_distribution_options.merge!(distribution_options(path))
       end
 
@@ -541,7 +542,7 @@ module Katello
       end
 
       def append_proxy_cacert(options)
-        if root.http_proxy&.cacert&.present? && options.key?(:ca_cert)
+        if root.http_proxy&.cacert.present? && options.key?(:ca_cert)
           options[:ca_cert] = [options[:ca_cert], root.http_proxy.cacert].compact.join("\n")
         end
         options

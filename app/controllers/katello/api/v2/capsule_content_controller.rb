@@ -71,8 +71,9 @@ module Katello
         :content_view_id => @content_view.try(:id),
         :repository_id => @repository.try(:id),
         :skip_metadata_check => skip_metadata_check,
+        :force_sync => skip_metadata_check,
       }
-      sync_options[:environment_ids] = @capsule.lifecycle_environments&.pluck(:id) unless (@environment || @content_view || @repository)
+      sync_options[:environment_ids] = @capsule.lifecycle_environments&.pluck(:id) unless @environment || @content_view || @repository
       task = async_task(::Actions::Katello::CapsuleContent::Sync,
                         @capsule,
                         sync_options)
@@ -139,7 +140,7 @@ module Katello
         :content_view_id => @content_view.try(:id),
         :repository_id => @repository.try(:id),
       }
-      repair_options[:environment_ids] = @capsule.lifecycle_environments&.pluck(:id) unless (@environment || @content_view || @repository)
+      repair_options[:environment_ids] = @capsule.lifecycle_environments&.pluck(:id) unless @environment || @content_view || @repository
 
       task = async_task(::Actions::Katello::CapsuleContent::VerifyChecksum,
                         @capsule,

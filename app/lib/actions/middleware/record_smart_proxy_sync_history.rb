@@ -1,19 +1,40 @@
+require 'set'
+
 module Actions
   module Middleware
     class RecordSmartProxySyncHistory < Dynflow::Middleware
-      def save_smart_proxy_sync_history
-        if (action.input[:repository_id] && (action.input[:smart_proxy_id] || action.input[:capsule_id]) && !self.action.output[:smart_proxy_history_id])
-          repo_id = action.input[:repository_id]
-          repo = ::Katello::Repository.find_by(id: repo_id)
-          smart_proxy_id = action.input[:smart_proxy_id] || action.input[:capsule_id]
-          smart_proxy = ::SmartProxy.unscoped.find_by(id: smart_proxy_id)
+      def repository_ids
+        ids = if action.input[:repository_id]
+                [action.input[:repository_id]]
+              else
+                Array(action.input[:repository_ids])
+              end
+        ids.compact.uniq
+      end
 
-          if repo && smart_proxy
-            self.action.output[:smart_proxy_history_id] = repo.create_smart_proxy_sync_history(smart_proxy)
-          else
-            fail "Smart Proxy could not be found with id #{smart_proxy_id}" if smart_proxy.nil?
-            fail "Repository could not be found with id #{repo_id}" if repo.nil?
-          end
+      def save_smart_proxy_sync_history
+        return if repository_ids.empty?
+        return unless action.input[:smart_proxy_id] || action.input[:capsule_id]
+        return if self.action.output[:smart_proxy_history_id] || self.action.output[:smart_proxy_history_ids]
+
+        existing_repo_ids = ::Katello::Repository.where(id: repository_ids).pluck(:id).to_set
+        smart_proxy_id = action.input[:smart_proxy_id] || action.input[:capsule_id]
+        smart_proxy = ::SmartProxy.unscoped.find_by(id: smart_proxy_id)
+
+        fail "Smart Proxy could not be found with id #{smart_proxy_id}" if smart_proxy.nil?
+
+        missing_repo_id = repository_ids.find { |repo_id| !existing_repo_ids.include?(repo_id) }
+        fail "Repository could not be found with id #{missing_repo_id}" if missing_repo_id
+
+        history_ids = ::Katello::SmartProxySyncHistory.bulk_start(
+          smart_proxy: smart_proxy,
+          repository_ids: repository_ids
+        )
+
+        if history_ids.one? && action.input[:repository_id]
+          self.action.output[:smart_proxy_history_id] = history_ids.first
+        else
+          self.action.output[:smart_proxy_history_ids] = history_ids
         end
       end
 

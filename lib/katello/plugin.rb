@@ -692,6 +692,12 @@ Foreman::Plugin.register :katello do
         full_name: N_('Calculate content counts on smart proxies automatically'),
         description: N_("If this is enabled, content counts on smart proxies will be updated automatically after content sync.")
 
+      setting 'pulp_replicate_capsule_sync',
+        type: :boolean,
+        default: false,
+        full_name: N_('Sync yum Capsule content via replicate()'),
+        description: N_("If this is enabled, yum Capsule content sync is delegated to pulpcore's replicate() on capsules that support it, instead of Katello's per-repository sync loop. Container content continues to use the classic sync path.")
+
       setting 'hide_reclaim_space_warning',
         type: :boolean,
         default: false,
