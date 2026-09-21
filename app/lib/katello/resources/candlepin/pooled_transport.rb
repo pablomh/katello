@@ -144,7 +144,7 @@ module Katello
           end
 
           def request(uri, request)
-            with_connection_error_reset do
+            log_connection_errors do
               client_for_current_key.request(uri, request)
             end
           end
@@ -229,11 +229,13 @@ module Katello
             [ENV.fetch('KATELLO_CANDLEPIN_PERSISTENT_IDLE_TIMEOUT', DEFAULT_IDLE_TIMEOUT).to_i, 1].max
           end
 
-          def with_connection_error_reset
+          # net-http-persistent already isolates a failed connection to its own
+          # pool slot; discarding the whole client here would only cost other
+          # threads their live, unrelated connections.
+          def log_connection_errors
             yield
           rescue Net::HTTP::Persistent::Error, Errno::ECONNRESET, Errno::EPIPE, IOError => e
-            @logger.info("Resetting pooled Candlepin HTTP client for #{@site} after #{e.class}: #{e.message}")
-            reset!
+            @logger.info("Candlepin connection error for #{@site}: #{e.class}: #{e.message}")
             raise
           end
         end

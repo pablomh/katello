@@ -221,14 +221,13 @@ module Katello
           assert_equal 9, @client.send(:configured_idle_timeout)
         end
 
-        def test_connection_error_resets_and_rebuilds_persistent_client
-          failing_client = mock('failing_http_client')
-          healthy_client = mock('healthy_http_client')
-          failing_client.expects(:request).raises(Net::HTTP::Persistent::Error.new('connection reset by peer'))
-          failing_client.expects(:shutdown).returns(true)
-          healthy_client.expects(:request).returns(:ok)
-          healthy_client.stubs(:shutdown).returns(true)
-          @client.stubs(:build_client).returns(failing_client, healthy_client)
+        def test_connection_error_is_reraised_without_discarding_the_pool
+          shared_client = mock('shared_http_client')
+          sequence = sequence('requests')
+          shared_client.expects(:request).raises(Net::HTTP::Persistent::Error.new('connection reset by peer')).in_sequence(sequence)
+          shared_client.expects(:request).returns(:ok).in_sequence(sequence)
+          shared_client.stubs(:shutdown).returns(true)
+          @client.stubs(:build_client).once.returns(shared_client)
           File.stubs(:exist?).with('/tmp/candlepin-ca.pem').returns(true)
           File.stubs(:stat).with('/tmp/candlepin-ca.pem').returns(stub(size: 128, mtime: Time.at(100)))
 
@@ -239,8 +238,7 @@ module Katello
             @client.request(uri, request)
           end
 
-          assert_nil @client.instance_variable_get(:@client)
-          assert_nil @client.instance_variable_get(:@client_key)
+          assert_same shared_client, @client.instance_variable_get(:@client)
           assert_equal :ok, @client.request(uri, request)
         end
       end
