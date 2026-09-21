@@ -3,6 +3,7 @@ module Actions
     module Organization
       class ManifestRefresh < Actions::AbstractAsyncTask
         middleware.use Actions::Middleware::PropagateCandlepinErrors
+        middleware.use Actions::Middleware::ResetUpstreamCandlepinConnection
 
         include Helpers::Notifications
 

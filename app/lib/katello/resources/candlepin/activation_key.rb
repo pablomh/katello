@@ -42,27 +42,8 @@ module Katello
           # id : ID of the Activation Key
           # content_overrides => Array of content override hashes
           def update_content_overrides(id, content_overrides)
-            attrs_to_delete = []
-            attrs_to_update = []
-            content_overrides.each do |content_override|
-              if content_override[:value]
-                attrs_to_update << content_override
-              else
-                attrs_to_delete << content_override
-              end
-            end
-
-            if attrs_to_update.present?
-              result = Candlepin::CandlepinResource.put(join_path(path(id), 'content_overrides'),
-                                                        attrs_to_update.to_json, self.default_headers)
-            end
-            if attrs_to_delete.present?
-              client = Candlepin::CandlepinResource.rest_client(Net::HTTP::Delete, :delete,
-                                                                join_path(path(id), 'content_overrides'))
-              client.options[:payload] = attrs_to_delete.to_json
-              result = client.delete({:accept => :json, :content_type => :json}.merge(User.cp_oauth_header))
-            end
-            ::Katello::Util::Data.array_with_indifferent_access(JSON.parse(result || '{}'))
+            result = Candlepin::CandlepinResource.update_content_overrides_for(path(id), content_overrides)
+            ::Katello::Util::Data.array_with_indifferent_access(JSON.parse(result&.body || '{}'))
           end
 
           def path(id = nil, owner_id = nil)

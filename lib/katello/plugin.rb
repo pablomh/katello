@@ -479,6 +479,12 @@ Foreman::Plugin.register :katello do
         full_name: N_('Subscription connection enabled'),
         description: N_("Can communicate with the Red Hat Portal for subscriptions.")
 
+      setting 'candlepin_pooled_http_enabled',
+        type: :boolean,
+        default: true,
+        full_name: N_('Enable pooled Candlepin HTTP connections'),
+        description: N_("Reuse persistent HTTP/TLS connections for local Candlepin and RHSM proxy traffic. Disable this as a rollback switch if pooled Candlepin transport causes environment-specific issues.")
+
       setting 'errata_status_installable',
         type: :boolean,
         default: false,

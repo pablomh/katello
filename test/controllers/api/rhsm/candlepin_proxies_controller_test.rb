@@ -29,6 +29,107 @@ module Katello
       ::Katello::RegistrationManager.stubs(:check_registration_services).returns(true)
     end
 
+    def build_proxy_response(body: '{"status":"ok"}', code: '200')
+      net_response = stub(body: body, code: code)
+      net_response.stubs(:each_header).multiple_yields(
+        ['Content-Type', 'application/json'],
+        ['X-Version', '4.3.1']
+      )
+
+      ::Katello::Resources::Candlepin::PooledTransport::Response.new(
+        net_response,
+        url: 'https://localhost:23443/candlepin/status'
+      )
+    end
+
+    def stub_proxy_passthrough(path:, body: '')
+      @controller.stubs(:authorize_proxy_routes).returns(true)
+      @controller.stubs(:set_organization_id).returns(true)
+      @controller.stubs(:check_media_type).returns(true)
+      @controller.stubs(:add_candlepin_version_header).returns(true)
+      @controller.instance_variable_set(:@request_path, path)
+      @controller.instance_variable_set(:@request_body, StringIO.new(body))
+      @controller.stubs(:proxy_request_path)
+      @controller.stubs(:proxy_request_body)
+    end
+
+    describe "proxy pass-through actions" do
+      it "filters pooled GET responses using the response body" do
+        stub_proxy_passthrough(path: '/status')
+        pooled_response = build_proxy_response
+        modified_since = 'Wed, 01 Jan 2025 00:00:00 GMT'
+        request.headers[Api::Rhsm::CandlepinProxiesController::IF_MODIFIED_SINCE_HEADER] = modified_since
+
+        Resources::Candlepin::Proxy.expects(:get).with('/status', { 'If-Modified-Since' => modified_since }).returns(pooled_response)
+        @controller.expects(:filter_sensitive_data).with(pooled_response.body).at_least_once.returns(pooled_response.body)
+
+        process :get, method: :get
+
+        assert_response 200
+      end
+
+      it "filters pooled POST responses using the response body" do
+        request_body = '{"name":"override"}'
+        stub_proxy_passthrough(path: '/consumers/uuid-1', body: request_body)
+        pooled_response = build_proxy_response
+
+        Resources::Candlepin::Proxy.expects(:post).with('/consumers/uuid-1', request_body, {}).returns(pooled_response)
+        @controller.expects(:filter_sensitive_data).with(pooled_response.body).at_least_once.returns(pooled_response.body)
+
+        process :post, method: :post
+
+        assert_response 200
+      end
+
+      it "filters pooled PUT responses using the response body" do
+        request_body = '{"serviceLevel":"Premium"}'
+        stub_proxy_passthrough(path: '/consumers/uuid-1', body: request_body)
+        pooled_response = build_proxy_response
+
+        Resources::Candlepin::Proxy.expects(:put).with('/consumers/uuid-1', request_body, {}).returns(pooled_response)
+        @controller.expects(:filter_sensitive_data).with(pooled_response.body).at_least_once.returns(pooled_response.body)
+
+        process :put, method: :put, params: { id: 'uuid-1' }
+
+        assert_response 200
+      end
+
+      it "filters pooled DELETE responses using the response body" do
+        request_body = '[{"name":"enabled","value":null}]'
+        stub_proxy_passthrough(path: '/consumers/uuid-1/content_overrides', body: request_body)
+        pooled_response = build_proxy_response
+
+        Resources::Candlepin::Proxy.expects(:delete).with('/consumers/uuid-1/content_overrides', request_body, {}).returns(pooled_response)
+        @controller.expects(:filter_sensitive_data).with(pooled_response.body).at_least_once.returns(pooled_response.body)
+
+        process :delete, method: :delete, params: { id: 'uuid-1' }
+
+        assert_response 200
+      end
+    end
+
+    describe "request context" do
+      after do
+        ::Logging.mdc.delete('request')
+      end
+
+      it "stores a forwarded correlation id in logging context" do
+        request.headers[Api::Rhsm::CandlepinProxiesController::X_CORRELATION_ID_HEADER] = 'corr-123'
+
+        @controller.send(:use_forwarded_correlation_id)
+
+        assert_equal 'corr-123', ::Logging.mdc['request']
+      end
+
+      it "falls back to request id when no forwarded correlation id is present" do
+        request.stubs(:request_id).returns('generated-req-id')
+
+        @controller.send(:use_forwarded_correlation_id)
+
+        assert_equal 'generated-req-id', ::Logging.mdc['request']
+      end
+    end
+
     describe "register with activation key should fail" do
       it "without specifying owner (organization)" do
         post('consumer_activate', params: { :activation_keys => 'non_existent_key' })

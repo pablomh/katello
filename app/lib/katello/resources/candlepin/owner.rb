@@ -55,7 +55,7 @@ module Katello
               path += "?force=#{SETTINGS[:katello][:force_manifest_import]}"
             end
 
-            response = self.post(path, {:import => File.new(path_to_file, 'rb')}, self.default_headers.except('content-type'))
+            response = self.post(path, {:import => File.new(path_to_file, 'rb')}, self.default_headers.except('content-type')).body
             JSON.parse(response)
           end
 
@@ -64,12 +64,12 @@ module Katello
           end
 
           def destroy_imports(organization_name, wait_until_complete: false)
-            response_json = self.delete(join_path(path(organization_name), 'imports'), self.default_headers)
+            response_json = self.delete(join_path(path(organization_name), 'imports'), self.default_headers).body
             response = JSON.parse(response_json).with_indifferent_access
             if wait_until_complete && response['state'] == 'CREATED'
               while !response['state'].nil? && response['state'] != 'FINISHED' && response['state'] != 'ERROR'
                 path = join_path('candlepin', response['statusPath'][1..])
-                response_json = self.get(path, self.default_headers)
+                response_json = self.get(path, self.default_headers).body
                 response = JSON.parse(response_json).with_indifferent_access
               end
             end
@@ -78,7 +78,7 @@ module Katello
           end
 
           def imports(organization_name)
-            imports_json = self.get(join_path(path(organization_name), 'imports'), self.default_headers)
+            imports_json = self.get(join_path(path(organization_name), 'imports'), self.default_headers).body
             ::Katello::Util::Data.array_with_indifferent_access JSON.parse(imports_json)
           end
 

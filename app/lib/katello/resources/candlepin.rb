@@ -1,9 +1,13 @@
+require_relative 'candlepin/pooled_transport'
+
 module Katello
   module Resources
     module Candlepin
       TOTAL_COUNT_HEADER = :x_total_count # as parsed by rest_client
 
       class CandlepinResource < HttpResource
+        class_attribute :use_persistent_connection, default: true
+
         cfg = SETTINGS[:katello][:candlepin]
         url = cfg[:url]
         uri = URI.parse(url)
@@ -14,9 +18,40 @@ module Katello
         self.ssl_ca_file = ::Cert::Certs.backend_ca_cert_file(:candlepin)
 
         class << self
+          def persistent_connection_enabled?
+            use_persistent_connection && Setting[:candlepin_pooled_http_enabled]
+          end
+
+          def persistent_http_client
+            @persistent_http_client ||= Candlepin::PooledTransport::PersistentHttpClient.new(
+              site: site,
+              ca_file_resolver: method(:current_ssl_ca_file),
+              pool_size: persistent_pool_size,
+              logger: logger
+            )
+          end
+
+          def persistent_transport
+            @persistent_transport ||= Candlepin::PooledTransport::PersistentTransport.new(
+              self,
+              pooled_http_client: persistent_http_client
+            )
+          end
+
+          def rest_client_transport
+            @rest_client_transport ||= Candlepin::PooledTransport::RestClientTransport.new(self)
+          end
+
+          def reset_persistent_http!
+            @persistent_transport = nil
+            @rest_client_transport = nil
+            @persistent_http_client&.reset!
+            @persistent_http_client = nil
+          end
+
           def process_response(response)
             debug_level = response.code >= 400 ? :error : :debug
-            logger.send(debug_level, "Candlepin request #{response.headers[:x_candlepin_request_uuid]} returned with code #{response.code}")
+            logger.send(debug_level) { "Candlepin request #{response.headers[:x_candlepin_request_uuid]} returned with code #{response.code}" }
             super
           end
 
@@ -28,6 +63,93 @@ module Katello
             end
 
             super
+          end
+
+          def issue_request(method:, path:, headers: {}, payload: nil)
+            log_candlepin_request(method, path, headers, payload)
+            process_response(transport_for(payload).call(method: method, path: path, headers: headers, payload: payload))
+          rescue RestClient::Exception => e
+            raise_rest_client_exception(e, path, method.to_s.upcase)
+          rescue Errno::ECONNREFUSED
+            service = path.split("/").second
+            raise Errors::ConnectionRefusedException,
+              _("A backend service [ %s ] is unreachable") % service.capitalize
+          rescue Net::HTTP::Persistent::Error => e
+            if e.message.include?('connection refused')
+              raise Errors::ConnectionRefusedException, _("A backend service [ Candlepin ] is unreachable")
+            end
+            raise
+          rescue Net::OpenTimeout, Net::ReadTimeout => e
+            exception = RestClient::RequestTimeout.allocate
+            exception.instance_variable_set(:@message, e.message)
+            raise_rest_client_exception(exception, path, method.to_s.upcase)
+          end
+
+          def current_ssl_ca_file
+            ::Cert::Certs.backend_ca_cert_file(:candlepin)
+          end
+
+          def update_content_overrides_for(resource_path, content_overrides)
+            attrs_to_delete = []
+            attrs_to_update = []
+
+            content_overrides.each do |content_override|
+              if content_override[:value]
+                attrs_to_update << content_override
+              else
+                attrs_to_delete << content_override
+              end
+            end
+
+            if attrs_to_update.present?
+              result = put(join_path(resource_path, 'content_overrides'),
+                           attrs_to_update.to_json,
+                           default_headers)
+            end
+
+            if attrs_to_delete.present?
+              result = issue_request(
+                method: :delete,
+                path: join_path(resource_path, 'content_overrides'),
+                headers: default_headers,
+                payload: attrs_to_delete.to_json
+              )
+            end
+
+            result
+          end
+
+          private
+
+          def persistent_pool_size
+            [ENV.fetch('FOREMAN_PUMA_THREADS_MAX', ENV.fetch('RAILS_MAX_THREADS', 5)).to_i, 1].max
+          end
+
+          def issue_request_via_rest_client(method:, path:, headers: {}, payload: nil)
+            client = rest_client(Katello::HttpResource::REQUEST_MAP.fetch(method), method, path)
+            args = [method, payload, headers].compact
+            process_response(client.public_send(*args))
+          end
+
+          def transport_for(payload)
+            # Multipart/file uploads still rely on RestClient. Those callers
+            # pass Hash payloads while simple string JSON bodies can use the pool.
+            return rest_client_transport if payload.is_a?(Hash) || !persistent_connection_enabled?
+
+            persistent_transport
+          end
+
+          def log_candlepin_request(method, path, headers, payload)
+            logger.debug { "Candlepin #{method.upcase} request: #{path}" }
+            logger.debug { "Headers: #{headers.to_json}" } if headers.present?
+            return unless payload
+
+            logger.debug do
+              body = payload.is_a?(String) ? payload : payload.to_json
+              "Body: #{filter_sensitive_data(body)}"
+            rescue JSON::GeneratorError, Encoding::UndefinedConversionError
+              "Body: Error: could not render payload as json"
+            end
           end
         end
 
@@ -83,6 +205,7 @@ module Katello
       class UpstreamCandlepinResource < CandlepinResource
         extend ::Katello::Util::HttpProxy
 
+        self.use_persistent_connection = false
         self.prefix = '/subscription'
 
         class << self
@@ -124,6 +247,21 @@ module Katello
             resource({ http_method: method }, url: self.site + path, client_cert: client_cert, client_key: client_key, ca_file: nil)
           end
 
+          def issue_request(method:, path:, headers: {}, payload: nil)
+            log_candlepin_request(method, path, headers, payload)
+            issue_request_via_rest_client(method: method, path: path, headers: headers, payload: payload)
+          rescue RestClient::Exception => e
+            raise_rest_client_exception(e, path, method.to_s.upcase)
+          rescue Errno::ECONNREFUSED
+            service = path.split("/").second
+            raise Errors::ConnectionRefusedException,
+              _("A backend service [ %s ] is unreachable") % service.capitalize
+          end
+
+          def reset_connection!
+            @upstream_owner_ids = nil
+          end
+
           def client_cert
             upstream_id_cert['cert']
           end
@@ -137,7 +275,9 @@ module Katello
           end
 
           def site
-            "#{upstream_api_uri.scheme}://#{upstream_api_uri.host}"
+            default_port = (upstream_api_uri.scheme == 'https') ? 443 : 80
+            upstream_site = "#{upstream_api_uri.scheme}://#{upstream_api_uri.host}"
+            (upstream_api_uri.port == default_port) ? upstream_site : "#{upstream_site}:#{upstream_api_uri.port}"
           end
 
           def upstream_id_cert
@@ -149,7 +289,9 @@ module Katello
           end
 
           def upstream_owner_id
-            JSON.parse(Katello::Resources::Candlepin::UpstreamConsumer.resource.get.body)['owner']['key']
+            org_id = Organization.current&.id
+            @upstream_owner_ids ||= {}
+            @upstream_owner_ids[org_id] ||= JSON.parse(Katello::Resources::Candlepin::UpstreamConsumer.resource.get.body)['owner']['key']
           rescue RestClient::Exception => e
             Rails.logger.error "Unable to find upstream owner for consumer"
             raise e

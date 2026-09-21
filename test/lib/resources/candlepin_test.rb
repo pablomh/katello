@@ -4,6 +4,10 @@ module Katello
   module Resources
     module Candlepin
       class UpstreamCandlepinResourceTest < ActiveSupport::TestCase
+        def teardown
+          UpstreamCandlepinResource.reset_connection!
+        end
+
         def test_upstream_consumer_nil_current_organization
           Organization.stubs(:current).returns(nil)
           UpstreamCandlepinResource.upstream_consumer
@@ -69,6 +73,57 @@ module Katello
           assert headers.key?('accept'), "Headers should still include 'accept'"
           assert headers.key?('content-type'), "Headers should still include 'content-type'"
         end
+
+        def test_site_preserves_non_default_port
+          upstream = {
+            'apiUrl' => 'https://subscription.example.com:8443/subscription/consumers/uuid-1',
+            'idCert' => { 'cert' => 'cert-data', 'key' => 'key-data' },
+            'uuid' => 'uuid-1',
+          }
+          Organization.stubs(:current).returns(stub(id: 7, owner_details: { 'upstreamConsumer' => upstream }))
+
+          assert_equal 'https://subscription.example.com:8443', UpstreamCandlepinResource.site
+        end
+
+        def test_upstream_consumer_get_uses_rest_client_path
+          User.stubs(:cp_oauth_header).returns({})
+          UpstreamConsumer.stubs(:upstream_consumer_id).returns('uuid-1')
+          resource = mock('upstream_rest_client')
+          response = stub(body: '{"uuid":"uuid-1"}', code: 200, headers: { x_version: '4.3.1' })
+
+          resource.expects(:get).with(UpstreamConsumer.default_headers).returns(response)
+          UpstreamConsumer.expects(:rest_client).with(
+            Net::HTTP::Get,
+            :get,
+            '/subscription/consumers/uuid-1?consumerType=system'
+          ).returns(resource)
+
+          result = UpstreamConsumer.get('consumerType' => 'system')
+
+          assert_equal 'uuid-1', result['uuid']
+        end
+
+        def test_reset_connection_clears_cached_upstream_owner
+          upstream = {
+            'apiUrl' => 'https://subscription.example.com/subscription/consumers/uuid-1',
+            'idCert' => { 'cert' => 'cert-data', 'key' => 'key-data' },
+            'uuid' => 'uuid-1',
+          }
+          Organization.stubs(:current).returns(stub(id: 7, owner_details: { 'upstreamConsumer' => upstream }))
+
+          first_resource = mock('first_resource')
+          first_resource.expects(:get).returns(stub(body: '{"owner":{"key":"owner-one"}}'))
+          second_resource = mock('second_resource')
+          second_resource.expects(:get).returns(stub(body: '{"owner":{"key":"owner-two"}}'))
+          UpstreamConsumer.expects(:resource).twice.returns(first_resource, second_resource)
+
+          assert_equal 'owner-one', UpstreamCandlepinResource.upstream_owner_id
+          assert_equal 'owner-one', UpstreamCandlepinResource.upstream_owner_id
+
+          UpstreamCandlepinResource.reset_connection!
+
+          assert_equal 'owner-two', UpstreamCandlepinResource.upstream_owner_id
+        end
       end
 
       class CandlepinResourceTest < ActiveSupport::TestCase
@@ -79,6 +134,39 @@ module Katello
 
           assert headers.key?('cp-user'), "CandlepinResource should include 'cp-user' header for local Candlepin"
           assert_equal 'admin', headers['cp-user']
+        end
+      end
+
+      class OwnerTest < ActiveSupport::TestCase
+        def test_destroy_imports_parses_response_body
+          User.stubs(:cp_oauth_header).returns({})
+          Owner.expects(:delete).with(
+            '/candlepin/owners/acme/imports',
+            Owner.default_headers
+          ).returns(stub(body: '{"state":"FINISHED"}'))
+
+          response = Owner.destroy_imports('acme')
+
+          assert_equal 'FINISHED', response['state']
+        end
+      end
+
+      class UpstreamJobTest < ActiveSupport::TestCase
+        def test_get_parses_upstream_response_body
+          upstream = {
+            'apiUrl' => 'https://subscription.example.com/subscription/consumers/uuid-1',
+            'idCert' => { 'cert' => 'cert-data', 'key' => 'key-data' },
+          }
+          UpstreamConsumer.expects(:start_upstream_export).with(
+            'https://subscription.example.com/subscription/jobs/job-1',
+            'cert-data',
+            'key-data',
+            nil
+          ).returns(stub(body: '{"state":"FINISHED"}'))
+
+          response = UpstreamJob.get('job-1', upstream)
+
+          assert_equal 'FINISHED', response[:state]
         end
       end
 

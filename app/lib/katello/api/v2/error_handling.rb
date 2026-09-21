@@ -151,9 +151,12 @@ module Katello
         end
 
         def format_subsys_exception_hash(exception)
-          orig_hash = JSON.parse(exception.response).with_indifferent_access rescue {}
+          response_body = if exception.respond_to?(:response)
+                            exception.response.respond_to?(:body) ? exception.response.body : exception.response.to_s
+                          end
+          orig_hash = JSON.parse(response_body).with_indifferent_access rescue {}
 
-          orig_hash[:displayMessage] = exception.response.to_s.gsub(/^"|"$/, "") if orig_hash[:displayMessage].nil? && exception.respond_to?(:response)
+          orig_hash[:displayMessage] = response_body.to_s.gsub(/^"|"$/, "") if orig_hash[:displayMessage].nil? && exception.respond_to?(:response)
           orig_hash[:displayMessage] = exception.message if orig_hash[:displayMessage].blank?
           orig_hash[:errors] = [orig_hash[:displayMessage]] if orig_hash[:errors].nil?
           orig_hash
