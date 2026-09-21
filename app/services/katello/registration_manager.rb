@@ -109,7 +109,7 @@ module Katello
           end
         end
 
-        hosts = hosts.reject { |host| host.name == host_name }
+        hosts = hosts.reject { |other_host| other_host.name == host_name }
         registration_error("The DMI UUID of this host (%{uuid}) matches other registered hosts: %{existing}", uuid: host_uuid, existing: joined_hostnames(hosts))
       end
 

@@ -115,7 +115,7 @@ if %w[1 true yes].include?(ENV['KATELLO_CANDLEPIN_PROFILING'].to_s.downcase)
         def candlepin_request?(uri)
           return false if uri.nil?
 
-          [uri.host, uri.port] == candlepin_endpoint
+          candlepin_endpoint == [uri.host, uri.port]
         end
 
         def candlepin_endpoint
