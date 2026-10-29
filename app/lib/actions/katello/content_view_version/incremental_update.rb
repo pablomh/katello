@@ -69,20 +69,36 @@ module Actions
             sequence do
               repository_mapping = plan_action(ContentViewVersion::CreateRepos, new_content_view_version, repos_to_clone).repository_mapping
               separated_repo_map = separated_repo_mapping(repository_mapping, true)
+              unit_map = pulp3_content_mapping(content)
+              multicopy_repo_plans = {}
+
+              [:pulp3_deb_multicopy, :pulp3_yum_multicopy].each do |mapping|
+                next unless separated_repo_map[mapping].keys.flatten.present?
+
+                extended_repo_mapping = unit_map.values.flatten.empty? ? {} : pulp3_repo_mapping(separated_repo_map[mapping], old_version, unit_map)
+                multicopy_repo_plans[mapping] = {
+                  extended_repo_mapping: extended_repo_mapping,
+                  destination_repo_ids: extended_repo_mapping.values.pluck(:dest_repo)
+                }
+              end
+
+              deferred_metadata_repo_ids = multicopy_repo_plans.values.flat_map { |plan| plan[:destination_repo_ids] }.uniq
 
               repos_to_clone.each do |source_repos|
                 plan_action(Repository::CloneToVersion,
                             source_repos,
                             new_content_view_version,
                             repository_mapping[source_repos],
-                            incremental: true)
+                            incremental: true,
+                            generate_metadata: !deferred_metadata_repo_ids.include?(repository_mapping[source_repos].id))
               end
 
               concurrence do
                 [:pulp3_deb_multicopy, :pulp3_yum_multicopy].each do |mapping|
                   if separated_repo_map[mapping].keys.flatten.present?
-                    extended_repo_mapping = pulp3_repo_mapping(separated_repo_map[mapping], old_version)
-                    unit_map = pulp3_content_mapping(content)
+                    repo_plan = multicopy_repo_plans.fetch(mapping, {extended_repo_mapping: {}, destination_repo_ids: []})
+                    extended_repo_mapping = repo_plan[:extended_repo_mapping]
+                    multicopy_destination_repo_ids = repo_plan[:destination_repo_ids]
 
                     unless extended_repo_mapping.empty? || unit_map.values.flatten.empty?
                       sequence do
@@ -101,7 +117,7 @@ module Actions
                         copy_action_outputs << plan_action(Pulp3::Repository::MultiCopyUnits, extended_repo_mapping, unit_map,
                                                            dependency_solving: dep_solve).output
                         repos_to_clone.each do |source_repos|
-                          if separated_repo_map[mapping].keys.include?(source_repos)
+                          if multicopy_destination_repo_ids.include?(repository_mapping[source_repos].id)
                             copy_repos(repository_mapping[source_repos])
                           end
                         end
@@ -148,7 +164,7 @@ module Actions
           unit_map
         end
 
-        def pulp3_repo_mapping(repo_mapping, old_version)
+        def pulp3_repo_mapping(repo_mapping, old_version, unit_map = nil)
           pulp3_repo_mapping = {}
           repo_mapping.each do |source_repos, dest_repo|
             old_version_repo = old_version.repositories.archived.find_by(root_id: dest_repo.root_id)
@@ -156,6 +172,7 @@ module Actions
             next if old_version_repo.version_href == old_version_repo.library_instance.version_href
 
             source_library_repo = source_repos.first.library_instance? ? source_repos.first : source_repos.first.library_instance
+            next if unit_map.present? && !source_repository_contains_selected_units?(source_library_repo, unit_map)
 
             source_repos = [source_library_repo]
             if old_version_repo.version_href.nil?
@@ -166,9 +183,26 @@ module Actions
               base_version = old_version_repo.version_href.split("/")[-1].to_i
             end
 
-            pulp3_repo_mapping[source_repos.map(&:id)] = { dest_repo: dest_repo.id, base_version: base_version }
+            pulp3_repo_mapping[source_repos.map(&:id)] = {
+              dest_repo: dest_repo.id,
+              base_version: base_version,
+              base_repository_id: old_version_repo.id
+            }
           end
           pulp3_repo_mapping
+        end
+
+        def source_repository_contains_selected_units?(repository, unit_map)
+          unit_map = unit_map.with_indifferent_access
+
+          repository_contains_units?(repository.rpms, unit_map[:rpms]) ||
+            repository_contains_units?(repository.errata, unit_map[:errata]) ||
+            repository_contains_units?(repository.debs, unit_map[:debs])
+        end
+
+        def repository_contains_units?(association, unit_ids)
+          ids = Array(unit_ids).compact
+          ids.any? && association.where(id: ids).exists?
         end
 
         def repos_to_copy(old_version, new_components)

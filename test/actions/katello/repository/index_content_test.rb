@@ -48,5 +48,28 @@ module ::Actions::Katello::Repository
       refute_equal indexed_time.inspect, @repo.last_indexed.inspect
       assert_nil task.output[:index_skipped]
     end
+
+    def test_filtered_source_context_is_passed_to_repository_index
+      @repo.update(last_indexed: @now - 900.seconds)
+      source_repo = katello_repositories(:rhel_6_x86_64)
+
+      ::Katello::Repository.expects(:find).with(source_repo.id).returns(source_repo)
+      ::Katello::Repository.expects(:find).with(@repo.id).returns(@repo).at_least_once
+      @repo.expects(:index_content).with(
+        source_repository: source_repo,
+        full_index: false,
+        filter_ids: [1, 2],
+        rpm_filenames: ['foo.rpm']
+      )
+
+      ForemanTasks.sync_task(
+        ::Actions::Katello::Repository::IndexContent,
+        id: @repo.id,
+        source_repository_id: source_repo.id,
+        filter_ids: [1, 2],
+        rpm_filenames: ['foo.rpm'],
+        force_index: true
+      )
+    end
   end
 end

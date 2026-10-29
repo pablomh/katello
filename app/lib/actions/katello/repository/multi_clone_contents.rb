@@ -26,8 +26,14 @@ module Actions
                 end
               end
 
-              extended_repo_mapping.values.each do |dest_repo_map|
-                plan_action(Katello::Repository::IndexContent, id: dest_repo_map[:dest_repo].id)
+              extended_repo_mapping.each do |source_repos, dest_repo_map|
+                index_options = { id: dest_repo_map[:dest_repo].id }
+                if source_repos.count == 1
+                  index_options[:source_repository_id] = source_repos.first.id
+                  index_options[:filter_ids] = Array(dest_repo_map[:filters]).map(&:id) if dest_repo_map[:filters].present?
+                end
+
+                plan_action(Katello::Repository::IndexContent, index_options)
               end
             end
           end

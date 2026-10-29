@@ -7,6 +7,8 @@ module Actions
           param :source_repository_id
           param :full_index
           param :force_index
+          param :filter_ids
+          param :rpm_filenames
         end
 
         def run
@@ -19,14 +21,22 @@ module Actions
           end
 
           if input[:force_index] || (repo.last_contents_changed >= repo.last_indexed)
-            repo.index_content(source_repository: source_repository, full_index: input[:full_index].present?)
+            repo.index_content(
+              source_repository: source_repository,
+              full_index: input[:full_index].present?,
+              filter_ids: input[:filter_ids],
+              rpm_filenames: input[:rpm_filenames]
+            )
           else
             output[:index_skipped] = true
           end
 
+          output[:initial_content] = initial_counts
           output[:new_content] = {}
+          output[:final_content] = {}
           repo.repository_type.primary_content_types.each do |content_type|
             new_count = content_type.model_class.in_repositories(repo).count
+            output[:final_content][content_type.label] = new_count
             output[:new_content][content_type.label] = new_count - initial_counts[content_type.label]
           end
         end

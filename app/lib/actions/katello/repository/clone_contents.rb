@@ -24,7 +24,14 @@ module Actions
             metadata_generate(source_repositories, new_repository, filters, rpm_filenames, matching_content) if generate_metadata
 
             index_options = {id: new_repository.id, force_index: true}
-            index_options[:source_repository_id] = source_repositories.first.id if source_repositories.count == 1 && filters.empty? && rpm_filenames.nil?
+            if source_repositories.count == 1
+              if filters.present?
+                index_options[:source_repository_id] = source_repositories.first.id
+                index_options[:filter_ids] = Array(filters).map(&:id)
+              elsif rpm_filenames.nil?
+                index_options[:source_repository_id] = source_repositories.first.id
+              end
+            end
 
             if new_repository.deb? && generate_metadata
               plan_action(Candlepin::Product::ContentUpdate,
