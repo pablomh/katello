@@ -25,14 +25,23 @@ module Actions
                 plan_self(target_repository_id: repository.id, contents_changed: options[:contents_changed], skip_publication: true)
               end
               plan_action(Actions::Pulp3::ContentGuard::Refresh, smart_proxy) unless repository.unprotected || assume_content_guard_exists
-              if Setting[:distribute_archived_cvv] || repository.environment
+              if distribution_needs_refresh?(repository, options)
                 plan_action(Actions::Pulp3::Repository::RefreshDistribution, repository, smart_proxy,
                             :contents_changed => options[:contents_changed],
-                            # This sequence already refreshed the guard above, when the
-                            # repository needed it; never let the distribution refresh it again.
+                            # The guard was ensured above; do not refresh it again.
                             :assume_content_guard_exists => true)
               end
             end
+          end
+
+          def distribution_needs_refresh?(repository, options)
+            return false unless Setting[:distribute_archived_cvv] || repository.environment
+            return true unless options[:contents_changed] == false
+            return true if options[:source_repository].nil?
+            return true if repository.publication_href.blank?
+            source_publication = options[:source_repository].publication_href
+            return true if source_publication.present? && repository.publication_href != source_publication
+            !repository.distribution_references.exists?
           end
 
           def run

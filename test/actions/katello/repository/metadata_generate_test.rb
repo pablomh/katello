@@ -24,6 +24,7 @@ module Actions
         :source_publication_href => nil,
         :source_publication_prn => nil,
         :source_content_index_id => nil,
+        :contents_changed => true,
         :assume_content_guard_exists => false,
       }
     end

@@ -157,7 +157,7 @@ module Actions
                         :old_version => old_version.id, :changed_root_ids => changed_root_ids,
                         :adoptable_roots_seconds => adoptable_roots_seconds,
                         :propagated_composite_cv_ids => propagated_composite_cv_ids)
-              promote(new_content_view_version, environments)
+              promote(new_content_view_version, environments, changed_root_ids)
             end
           end
         end
@@ -518,8 +518,9 @@ module Actions
           fail _("Incremental update will not add any new content. The specified content is already present.")
         end
 
-        def promote(new_version, environments)
-          plan_action(Katello::ContentView::Promote, new_version, environments, true, nil)
+        def promote(new_version, environments, changed_root_ids)
+          plan_action(Katello::ContentView::Promote, new_version, environments, true, nil,
+                      :incremental_update => true, :changed_root_ids => changed_root_ids)
         end
 
         def plan_copy(action_class, source_repo, target_repo, clauses = nil, override_config = nil)

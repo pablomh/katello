@@ -557,6 +557,45 @@ module ::Actions::Katello::ContentView
       assert_action_planned(action, ::Actions::Katello::Repository::CloneToEnvironment)
     end
 
+    it 'treats every repository as changed without a delta set' do
+      action.stubs(:task).returns(success_task)
+      repository = katello_repositories(:fedora_17_x86_64)
+      repository.stubs(:unprotected).returns(true)
+      content_view_version.stubs(:archived_repos).returns([repository])
+
+      plan_action(action, content_view_version, environment, 'description')
+
+      assert_action_planned_with(action, ::Actions::Katello::Repository::CloneToEnvironment, repository, environment,
+                                 :assume_content_guard_exists => false, :contents_changed => true)
+    end
+
+    it 'marks repositories outside the delta as unchanged' do
+      action.stubs(:task).returns(success_task)
+      changed = katello_repositories(:fedora_17_x86_64)
+      unchanged = katello_repositories(:feedless_fedora_17_x86_64)
+      [changed, unchanged].each { |repository| repository.stubs(:unprotected).returns(true) }
+      content_view_version.stubs(:archived_repos).returns([changed, unchanged])
+
+      plan_action(action, content_view_version, environment, 'description', true, [changed.root_id])
+
+      assert_action_planned_with(action, ::Actions::Katello::Repository::CloneToEnvironment, changed, environment,
+                                 :assume_content_guard_exists => false, :contents_changed => true)
+      assert_action_planned_with(action, ::Actions::Katello::Repository::CloneToEnvironment, unchanged, environment,
+                                 :assume_content_guard_exists => false, :contents_changed => false)
+    end
+
+    it 'treats an empty delta set as no information' do
+      action.stubs(:task).returns(success_task)
+      repository = katello_repositories(:fedora_17_x86_64)
+      repository.stubs(:unprotected).returns(true)
+      content_view_version.stubs(:archived_repos).returns([repository])
+
+      plan_action(action, content_view_version, environment, 'description', true, [])
+
+      assert_action_planned_with(action, ::Actions::Katello::Repository::CloneToEnvironment, repository, environment,
+                                 :assume_content_guard_exists => false, :contents_changed => true)
+    end
+
     it 'does not run the matching-content check that nothing reads' do
       action.stubs(:task).returns(success_task)
       content_view_version.stubs(:archived_repos).returns([katello_repositories(:fedora_17_x86_64)])

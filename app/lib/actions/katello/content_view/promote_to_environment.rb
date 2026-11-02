@@ -3,7 +3,7 @@ module Actions
     module ContentView
       class PromoteToEnvironment < Actions::EntryAction
         execution_plan_hooks.use :trigger_capsule_sync, :on => :success
-        def plan(version, environment, description, incremental_update = false)
+        def plan(version, environment, description, incremental_update = false, changed_root_ids = nil)
           history = ::Katello::ContentViewHistory.create!(:content_view_version => version, :user => ::User.current.login,
                                                           :environment => environment, :task => self.task,
                                                           :status => ::Katello::ContentViewHistory::IN_PROGRESS,
@@ -20,7 +20,8 @@ module Actions
               archived_repos.each do |repository|
                 sequence do
                   plan_action(Repository::CloneToEnvironment, repository, environment,
-                              :assume_content_guard_exists => content_guard_needed)
+                              :assume_content_guard_exists => content_guard_needed,
+                              :contents_changed => changed_root_ids.blank? || changed_root_ids.include?(repository.root_id))
                 end
               end
 
@@ -37,7 +38,8 @@ module Actions
             end
 
             plan_self(history_id: history.id, environment_id: environment.id, user_id: ::User.current.id,
-                      environment_name: environment.name, content_view_id: version.content_view.id, incremental_update: incremental_update)
+                      environment_name: environment.name, content_view_id: version.content_view.id, incremental_update: incremental_update,
+                      changed_root_ids: changed_root_ids)
           end
         end
 
@@ -52,7 +54,7 @@ module Actions
         def finalize
           environment = ::Katello::KTEnvironment.find(input[:environment_id])
           ::Katello::Logging.time("PROMOTE", data: { phase: 'update_host_statuses' }) do
-            ::Katello::ContentView.find(input[:content_view_id]).update_host_statuses(environment)
+            ::Katello::ContentView.find(input[:content_view_id]).update_host_statuses(environment, input[:changed_root_ids])
           end
 
           history = ::Katello::ContentViewHistory.find(input[:history_id])

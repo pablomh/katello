@@ -9,6 +9,7 @@ module Actions
           copy_contents = options.fetch(:copy_contents, true)
           solve_dependencies = options.fetch(:solve_dependencies, false)
           assume_content_guard_exists = options.fetch(:assume_content_guard_exists, false)
+          contents_changed = options.fetch(:contents_changed, true)
 
           sequence do
             if copy_contents
@@ -20,7 +21,7 @@ module Actions
             end
 
             if generate_metadata
-              metadata_generate(source_repositories, new_repository, filters, rpm_filenames, assume_content_guard_exists)
+              metadata_generate(source_repositories, new_repository, filters, rpm_filenames, assume_content_guard_exists, contents_changed)
             else
               # Metadata is generated after the delta lands; the checksum type is
               # not part of it and would otherwise be lost.
@@ -47,10 +48,11 @@ module Actions
           end
         end
 
-        def metadata_generate(source_repositories, new_repository, filters, rpm_filenames, assume_content_guard_exists)
+        def metadata_generate(source_repositories, new_repository, filters, rpm_filenames, assume_content_guard_exists, contents_changed)
           metadata_options = {}
 
           metadata_options[:assume_content_guard_exists] = assume_content_guard_exists
+          metadata_options[:contents_changed] = contents_changed
 
           if source_repositories.count == 1 && filters.empty? && rpm_filenames.empty?
             metadata_options[:source_repository] = source_repositories.first

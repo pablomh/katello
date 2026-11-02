@@ -21,5 +21,16 @@ module ::Actions::Katello::Repository
 
       assert_action_planned(action, ::Actions::Katello::Repository::CloneContents)
     end
+
+    it 'passes on whether the content changed' do
+      clone = katello_repositories(:fedora_17_x86_64_dev)
+      action.stubs(:find_or_build_environment_clone).returns(clone)
+
+      plan_action(action, repository, environment, :contents_changed => false)
+
+      assert_action_planned_with(action, ::Actions::Katello::Repository::CloneContents, [repository], clone,
+                                 :copy_contents => false, :contents_changed => false,
+                                 :assume_content_guard_exists => false)
+    end
   end
 end
