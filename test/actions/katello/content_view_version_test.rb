@@ -48,7 +48,8 @@ module ::Actions::Katello::ContentViewVersion
     it 'plans' do
       SmartProxy.any_instance.stubs(:pulp3_support?).returns(false)
       stub_remote_user
-      @rpm = library_repo.rpms.first
+      @rpm = katello_rpms(:one)
+      ::Katello::RepositoryRpm.find_or_create_by!(:repository_id => library_repo.id, :rpm_id => @rpm.id)
 
       new_repo = ::Katello::Repository.new(:pulp_id => 387, :library_instance_id => library_repo.id, :root => library_repo.root)
       repository_mapping = {}
@@ -61,7 +62,7 @@ module ::Actions::Katello::ContentViewVersion
       plan_action(action, content_view_version, [library], :content => {:package_ids => [@rpm.id]})
 
       assert_action_planned_with(action, ::Actions::Katello::Repository::MetadataGenerate, new_repo)
-      assert_action_planned_with(action, ::Actions::Katello::Repository::IndexContent, id: new_repo.id)
+      assert_action_planned_with(action, ::Actions::Katello::Repository::IndexContent, id: new_repo.id, force_index: false)
     end
 
     describe 'pulp3' do
@@ -86,8 +87,9 @@ module ::Actions::Katello::ContentViewVersion
         cv_version = katello_content_view_versions(:library_view_version_2)
         new_repo.update(content_view_version_id: cv_version.id, relative_path: "blah")
         new_repo.update(version_href: "/test/versions/1/")
-        library_repo.update(version_href: "/library_test/versions/1/")
+        library_repo.update(version_href: "/library_test/versions/1/", publication_href: "/library_test/publications/1/")
         new_repo.save!
+        ::Katello::RepositoryRpm.find_or_create_by!(:repository_id => library_repo.id, :rpm_id => old_rpm.id)
         repository_mapping[[library_repo]] = new_repo
         Dynflow::Testing::DummyPlannedAction.any_instance.stubs(:repository_mapping).returns(repository_mapping)
         ::Actions::Katello::ContentViewVersion::IncrementalUpdate.any_instance.expects(:repos_to_copy).returns(repository_mapping.keys)
@@ -107,9 +109,20 @@ module ::Actions::Katello::ContentViewVersion
                                   pulp3_repo_map,
                                   { :debs => [], :errata => [], :rpms => [old_rpm.id] },
                                   :dependency_solving => false)
-        assert_action_planned_with(action, ::Actions::Pulp3::Repository::CopyContent, library_repo, SmartProxy.pulp_primary, new_repo, copy_all: true, remove_all: true)
+        assert_action_planned_with(action, ::Actions::Pulp3::Repository::CopyVersion, library_repo, SmartProxy.pulp_primary, new_repo)
+        refute_action_planned(action, ::Actions::Pulp3::Repository::CopyContent)
         assert_action_planned_with(action, ::Actions::Katello::Repository::MetadataGenerate, new_repo)
-        assert_action_planned_with(action, ::Actions::Katello::Repository::IndexContent, id: new_repo.id)
+        assert_action_planned_with(action, ::Actions::Katello::Repository::IndexContent, id: new_repo.id, force_index: false)
+      end
+
+      it 'generates the publication when the selected content is in the repository' do
+        pulp3_cvv_setup
+        ::Katello::Repository.any_instance.stubs(:soft_copy_of_library?).returns(true)
+        rpm = old_rpm
+        plan_action(action, content_view_version, [library], :resolve_dependencies => false, :content => {:package_ids => [rpm.id]})
+
+        assert_action_planned_with(action, ::Actions::Katello::Repository::MetadataGenerate, new_repo)
+        assert_action_planned_with(action, ::Actions::Katello::Repository::IndexContent, id: new_repo.id, force_index: false)
       end
 
       it 'respects dep solving true' do
