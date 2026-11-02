@@ -23,7 +23,8 @@ module Actions
                         :source_publication_href => options[:source_publication_href],
                         :source_publication_prn => options[:source_publication_prn],
                         :source_content_index_id => options[:source_content_index_id],
-                        :matching_content => matching_content)
+                        :matching_content => matching_content,
+                        :assume_content_guard_exists => options.fetch(:assume_content_guard_exists, false))
 
           if repository.deb? && repository.content && !repository.content.content_url.end_with?(repository.deb_content_url_options)
             plan_action(::Actions::Candlepin::Product::ContentUpdate,

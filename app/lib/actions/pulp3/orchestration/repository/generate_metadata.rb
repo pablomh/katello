@@ -7,6 +7,7 @@ module Actions
             force_publication = options.fetch(:force_publication, repository.publication_href.nil?)
 
             options[:contents_changed] = (options && options.key?(:contents_changed)) ? options[:contents_changed] : true
+            assume_content_guard_exists = options.fetch(:assume_content_guard_exists, false)
             publication_content_type = !::Katello::RepositoryTypeManager.find(repository.content_type).pulp3_skip_publication
 
             sequence do
@@ -23,10 +24,13 @@ module Actions
               elsif !publication_content_type
                 plan_self(target_repository_id: repository.id, contents_changed: options[:contents_changed], skip_publication: true)
               end
-              plan_action(Actions::Pulp3::ContentGuard::Refresh, smart_proxy) unless repository.unprotected
+              plan_action(Actions::Pulp3::ContentGuard::Refresh, smart_proxy) unless repository.unprotected || assume_content_guard_exists
               if Setting[:distribute_archived_cvv] || repository.environment
                 plan_action(Actions::Pulp3::Repository::RefreshDistribution, repository, smart_proxy,
-                            :contents_changed => options[:contents_changed], :assume_content_guard_exists => true)
+                            :contents_changed => options[:contents_changed],
+                            # This sequence already refreshed the guard above, when the
+                            # repository needed it; never let the distribution refresh it again.
+                            :assume_content_guard_exists => true)
               end
             end
           end

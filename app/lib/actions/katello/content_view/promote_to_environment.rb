@@ -10,12 +10,17 @@ module Actions
                                                           :action => 'promotion',
                                                           :notes => description)
 
+          archived_repos = version.archived_repos.to_a
+          content_guard_needed = archived_repos.any? { |repository| !repository.unprotected }
+
           sequence do
             plan_action(ContentView::AddToEnvironment, version, environment)
+            plan_action(::Actions::Pulp3::ContentGuard::Refresh, SmartProxy.pulp_primary) if content_guard_needed
             concurrence do
-              version.archived_repos.each do |repository|
+              archived_repos.each do |repository|
                 sequence do
-                  plan_action(Repository::CloneToEnvironment, repository, environment)
+                  plan_action(Repository::CloneToEnvironment, repository, environment,
+                              :assume_content_guard_exists => content_guard_needed)
                 end
               end
 

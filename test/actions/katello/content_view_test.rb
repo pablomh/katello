@@ -545,6 +545,27 @@ module ::Actions::Katello::ContentView
       assert_action_planned(action, Actions::Katello::ContentView::CapsuleSync)
     end
 
+    it 'ensures the content guard once for the promotion' do
+      action.stubs(:task).returns(success_task)
+      repository = katello_repositories(:fedora_17_x86_64)
+      repository.stubs(:unprotected).returns(false)
+      content_view_version.stubs(:archived_repos).returns([repository])
+
+      plan_action(action, content_view_version, environment, 'description')
+
+      assert_action_planned_with(action, ::Actions::Pulp3::ContentGuard::Refresh, SmartProxy.pulp_primary)
+      assert_action_planned(action, ::Actions::Katello::Repository::CloneToEnvironment)
+    end
+
+    it 'does not run the matching-content check that nothing reads' do
+      action.stubs(:task).returns(success_task)
+      content_view_version.stubs(:archived_repos).returns([katello_repositories(:fedora_17_x86_64)])
+
+      plan_action(action, content_view_version, environment, 'description')
+
+      refute_action_planned(action, ::Actions::Katello::Repository::CheckMatchingContent)
+    end
+
     context 'finalize phase' do
       it 'updates errata counts and status' do
         content_facet = katello_content_facets(:content_facet_two)
