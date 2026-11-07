@@ -1019,6 +1019,19 @@ module Katello
       end
     end
 
+    def index_units(unit_hrefs)
+      unit_hrefs = unit_hrefs.with_indifferent_access
+      repository_type.content_types_to_index.each do |type|
+        hrefs = unit_hrefs[type.label]
+        next if hrefs.blank?
+        Katello::Logging.time("CONTENT_INDEX", data: {type: type.model_class}) do
+          Katello::ContentUnitIndexer.new(content_type: type, repository: self,
+                                          pulp_content_ids: hrefs).import_all(true)
+        end
+      end
+      repository_type.index_additional_data_proc&.call(self)
+    end
+
     def index_linked_repo
       if (base_repo = self.target_repository)
         copy_indexed_data(base_repo)
@@ -1037,7 +1050,10 @@ module Katello
 
       full_index = options.fetch(:full_index, false)
       source_repository = options.fetch(:source_repository, nil)
-      if self.yum? && !self.primary?
+      unit_hrefs = options.fetch(:unit_hrefs, nil)
+      if unit_hrefs.present?
+        index_units(unit_hrefs)
+      elsif self.yum? && !self.primary?
         index_linked_repo
       elsif source_repository && !repository_type.unique_content_per_repo
         copy_indexed_data(source_repository)
