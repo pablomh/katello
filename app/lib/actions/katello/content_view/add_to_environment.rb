@@ -3,16 +3,18 @@ module Actions
     module ContentView
       class AddToEnvironment < Actions::Base
         def plan(content_view_version, environment)
-          cve = ::Katello::ContentViewManager.add_version_to_environment(
-            content_view_version: content_view_version,
-            environment: environment
-          )
+          ::Katello::Logging.time("PROMOTE", data: { phase: 'add_to_environment', environment_id: environment.id }) do
+            cve = ::Katello::ContentViewManager.add_version_to_environment(
+              content_view_version: content_view_version,
+              environment: environment
+            )
 
-          ::Katello::ContentViewManager.create_candlepin_environment(
-            content_view_environment: cve
-          )
+            ::Katello::ContentViewManager.create_candlepin_environment(
+              content_view_environment: cve
+            )
 
-          content_view_version.save!
+            content_view_version.save!
+          end
         end
       end
     end
