@@ -150,7 +150,9 @@ module Actions
                         :history_id => history.id, :copy_action_outputs => copy_action_outputs,
                         :old_version => old_version.id, :changed_root_ids => changed_root_ids,
                         :propagated_composite_cv_ids => propagated_composite_cv_ids)
-              promote(new_content_view_version, environments)
+              plan_action(Katello::ContentView::Promote, new_content_view_version, environments,
+                          true, nil, :incremental_update => true,
+                          :changed_root_ids => changed_root_ids)
             end
           end
         end
