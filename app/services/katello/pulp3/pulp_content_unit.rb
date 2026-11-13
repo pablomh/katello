@@ -120,9 +120,7 @@ module Katello
         page_size = options.fetch(:page_size, Setting[:bulk_load_size])
         page_opts = { "offset" => 0, limit: page_size }
         if options[:added_in_version] && options[:base_version]
-          # pulpcore < 3.118 has no added_between filter and ignores unknown
-          # filters, which would list unscoped content: index the new version whole.
-          page_opts[:repository_version] = options[:added_in_version]
+          page_opts[:added_between] = [options[:base_version], options[:added_in_version]]
         elsif options[:added_in_version]
           page_opts[:repository_version_added] = options[:added_in_version]
         else
