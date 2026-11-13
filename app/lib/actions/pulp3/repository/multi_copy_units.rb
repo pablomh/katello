@@ -15,8 +15,9 @@ module Actions
                       dependency_solving: options[:dependency_solving],
                       incremental_update: options[:incremental_update],
                       smart_proxy_id: SmartProxy.pulp_primary.id).output
-            plan_action(Pulp3::Repository::SaveVersions, repo_map.values.pluck(:dest_repo),
-                        tasks: action_output[:pulp_tasks]).output
+            dest_repos = repo_map.values
+            plan_action(Pulp3::Repository::SaveVersions, dest_repos.pluck(:dest_repo),
+                        tasks: action_output[:pulp_tasks], index_delta: true).output
           end
         end
 
@@ -29,10 +30,7 @@ module Actions
           end
 
           if input[:unit_map][:errata].any?
-            unit_hrefs << ::Katello::RepositoryErratum.
-              joins("inner join katello_errata on katello_repository_errata.erratum_id = katello_errata.id").
-              where("katello_repository_errata.repository_id in (#{repo_map.keys.join(',')}) and
-                    katello_errata.id in (#{input[:unit_map][:errata].join(",")})").map(&:erratum_pulp3_href)
+            unit_hrefs << erratum_hrefs(repo_map.keys.flatten, input[:unit_map][:errata])
           end
 
           if input[:unit_map][:debs].any?
@@ -44,7 +42,7 @@ module Actions
           end
           unit_hrefs.flatten!
 
-          repo_map.each do |_source_repos, dest_repo_map|
+          repo_map.each_value do |dest_repo_map|
             dest_repo_map[:content_unit_hrefs] = unit_hrefs
           end
 
@@ -52,6 +50,14 @@ module Actions
           unless unit_hrefs.flatten.empty?
             output[:pulp_tasks] = target_repo.backend_service(SmartProxy.pulp_primary).multi_copy_units(repo_map, input[:dependency_solving])
           end
+        end
+
+        # An advisory's Pulp href is recorded on the repository association,
+        # not on the advisory itself.
+        def erratum_hrefs(repository_ids, erratum_ids)
+          ::Katello::RepositoryErratum.
+            where(:repository_id => repository_ids, :erratum_id => erratum_ids).
+            pluck(:erratum_pulp3_href)
         end
       end
     end
