@@ -44,7 +44,7 @@ module Katello
         refute page_opts.key?(:added_between)
       end
 
-      def test_pulp_units_batch_for_repo_diffs_against_the_base_version_when_given_one
+      def test_pulp_units_batch_for_repo_indexes_the_added_version_when_given_a_base
         page_opts = capture_page_opts do
           ::Katello::Pulp3::Rpm.pulp_units_batch_for_repo(
             @repo,
@@ -54,10 +54,10 @@ module Katello
           ).to_a
         end
 
-        assert_equal ['/pulp/api/v3/repositories/rpm/rpm/version/1/',
-                      '/pulp/api/v3/repositories/rpm/rpm/version/3/'], page_opts[:added_between]
-        refute page_opts.key?(:repository_version)
+        # pulpcore < 3.118 has no added_between filter, so the whole added version is listed.
+        assert_equal '/pulp/api/v3/repositories/rpm/rpm/version/3/', page_opts[:repository_version]
         refute page_opts.key?(:repository_version_added)
+        refute page_opts.key?(:added_between)
       end
     end
   end
