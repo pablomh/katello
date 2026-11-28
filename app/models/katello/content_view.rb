@@ -468,11 +468,15 @@ module Katello
       end
     end
 
-    def update_host_statuses(environment)
+    def update_host_statuses(environment, root_ids = nil)
       # update errata applicability counts for all hosts in the CV & LE
       Location.no_taxonomy_scope do
         User.as_anonymous_admin do
-          ::Katello::Host::ContentFacet.with_content_views(self).with_environments(environment).find_each(batch_size: 500) do |facet|
+          facets = ::Katello::Host::ContentFacet.with_content_views(self).with_environments(environment)
+          unless root_ids.nil?
+            facets = facets.joins(:bound_repositories).where(:katello_repositories => { :root_id => root_ids }).distinct
+          end
+          facets.find_each(batch_size: 500) do |facet|
             ActiveRecord::Base.transaction do
               facet.update_applicability_counts
               facet.update_errata_status

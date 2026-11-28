@@ -3,19 +3,24 @@ module Actions
     module ContentView
       class PromoteToEnvironment < Actions::EntryAction
         execution_plan_hooks.use :trigger_post_tasks, :on => :success
-        def plan(version, environment, description, incremental_update = false)
+        def plan(version, environment, description, incremental_update = false, changed_repository_ids = nil)
           history = ::Katello::ContentViewHistory.create!(:content_view_version => version, :user => ::User.current.login,
                                                           :environment => environment, :task => self.task,
                                                           :status => ::Katello::ContentViewHistory::IN_PROGRESS,
                                                           :action => 'promotion',
                                                           :notes => description)
 
+          archived_repos = version.archived_repos.to_a
+          content_guard_needed = archived_repos.any? { |repository| !repository.unprotected }
+
           sequence do
             plan_action(ContentView::AddToEnvironment, version, environment)
+            plan_action(::Actions::Pulp3::ContentGuard::Refresh, SmartProxy.pulp_primary) if content_guard_needed
             concurrence do
-              version.archived_repos.each do |repository|
+              archived_repos.each do |repository|
                 sequence do
-                  plan_action(Repository::CloneToEnvironment, repository, environment)
+                  plan_action(Repository::CloneToEnvironment, repository, environment,
+                              :assume_content_guard_exists => content_guard_needed)
                 end
               end
 
@@ -32,7 +37,8 @@ module Actions
             end
 
             plan_self(history_id: history.id, environment_id: environment.id, user_id: ::User.current.id,
-                      environment_name: environment.name, content_view_id: version.content_view.id, incremental_update: incremental_update)
+                      environment_name: environment.name, content_view_id: version.content_view.id,
+                      incremental_update: incremental_update, changed_repository_ids: changed_repository_ids)
           end
         end
 
@@ -54,8 +60,15 @@ module Actions
           content_view = ::Katello::ContentView.find(input[:content_view_id])
           environment = ::Katello::KTEnvironment.find(input[:environment_id])
 
-          ForemanTasks.async_task(ContentView::UpdateHostStatus,
-                                  content_view, environment)
+          if input[:incremental_update]
+            repository_ids = Array(input[:changed_repository_ids]).flatten.compact
+            unless repository_ids.empty?
+              root_ids = ::Katello::Repository.where(:id => repository_ids).pluck(:root_id).uniq
+              ForemanTasks.async_task(ContentView::UpdateHostStatus, content_view, environment, root_ids)
+            end
+          else
+            ForemanTasks.async_task(ContentView::UpdateHostStatus, content_view, environment)
+          end
 
           if !input[:incremental_update] && sync_proxies?(environment) && Setting[:foreman_proxy_content_auto_sync]
             ForemanTasks.async_task(ContentView::CapsuleSync,
