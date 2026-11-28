@@ -18,8 +18,19 @@ module Katello
                                                     epoch: unit[:epoch], arch: unit[:arch]).select(:id)
         if rpms_to_disassociate.any?
           ::Katello::RepositoryRpm.where(rpm_id: rpms_to_disassociate, repository_id: @repository.id).destroy_all
+          note_duplicate_index_rows(rpms_to_disassociate.pluck(:id))
         end
       end
+    end
+
+    # The index row goes with the pass: deleting it here would be outside the lock and
+    # privacy check sync_content_index uses, and a concurrent adoption would leave it missing.
+    def note_duplicate_index_rows(ids)
+      duplicate_index_ids.concat(Array(ids))
+    end
+
+    def duplicate_index_ids
+      @duplicate_index_ids ||= []
     end
 
     def import_all(filtered_indexing = false)
@@ -58,17 +69,43 @@ module Katello
       association_tracker.unit_ids
     end
 
+    # Drops the repository's associations to the units the version filter lists, except +kept_unit_ids+.
     def remove_all(kept_unit_ids = [])
       removed_unit_ids = []
       units_from_pulp.each do |units|
         pulp_ids = units.map { |unit| unit[@service_class.unit_identifier] }
         unit_ids = self.class.pulp_id_to_id_map(@content_type, pulp_ids).values - kept_unit_ids
         next if unit_ids.empty?
-        @model_class.repository_association_class.where(repository_id: @repository.id,
-                                                        @model_class.unit_id_field => unit_ids).destroy_all
+        destroy_associations(@model_class.repository_association_class.where(repository_id: @repository.id,
+                                                                             @model_class.unit_id_field => unit_ids))
         removed_unit_ids.concat(unit_ids)
       end
-      removed_unit_ids
+      remove_from_content_index(removed_unit_ids)
+    end
+
+    # A shared index is immutable; only the version's own index may follow the delta.
+    def remove_from_content_index(unit_ids)
+      return if unit_ids.empty?
+
+      with_private_content_index do |index, association_class|
+        association_class.where(:content_index_id => index.id,
+                                @model_class.unit_id_field => unit_ids).delete_all
+      end
+    end
+
+    # Yields the index of the repository's current version while its lock is held, so
+    # GC cannot reclaim it and no other pass observes a half-applied delta. A shared
+    # index is skipped: its owner already materialised it.
+    def with_private_content_index
+      association_class = @model_class.content_index_association_class
+      version_href = @repository&.version_href
+      return if association_class.nil? || version_href.blank?
+
+      @repository.drop_stale_content_index_pointer
+      index = ::Katello::ContentIndex.for_version(version_href)
+      index.with_lock do
+        yield index, association_class if index.private_to?(@repository)
+      end
     end
 
     def reimport_units
@@ -145,6 +182,15 @@ module Katello
         @final_values
       end
 
+      def content_index_values(index)
+        db_values.map do |row|
+          values = row.dup
+          values.delete(:repository_id)
+          values[:content_index_id] = index.id
+          values
+        end
+      end
+
       def pulp_href_association_name
         'erratum_pulp3_href' if @content_type.label == 'erratum'
       end
@@ -178,16 +224,66 @@ module Katello
     def sync_repository_associations(association_tracker, additive: false)
       unless additive
         ActiveRecord::Base.connection.uncached do
-          repo_associations_to_destroy = @model_class.repository_association_class.where(repository_id: @repository.id).where.
+          repo_associations_to_destroy = @model_class.repository_association_class.where(repository_id: @repository.id)
+          # Generic subtypes share one association table; prune only this pass's.
+          if @model_class == ::Katello::GenericContentUnit
+            repo_associations_to_destroy = repo_associations_to_destroy.where(
+              :generic_content_unit_id => ::Katello::GenericContentUnit.where(:content_type => @content_type.label).select(:id)
+            )
+          end
+          repo_associations_to_destroy = repo_associations_to_destroy.where.
             not(@model_class.unit_id_field => association_tracker.unit_ids)
-          clean_filter_rules(repo_associations_to_destroy) if repo_associations_to_destroy.present? && [::Katello::ModuleStream, ::Katello::Erratum, ::Katello::PackageGroup].include?(@model_class)
-          repo_associations_to_destroy.destroy_all
+          destroy_associations(repo_associations_to_destroy)
         end
       end
-      return if association_tracker.db_values.empty?
-      @model_class.repository_association_class.upsert_all(association_tracker.db_values, :unique_by => association_class_uniqueness_attributes)
+      unless association_tracker.db_values.empty?
+        @model_class.repository_association_class.upsert_all(association_tracker.db_values, :unique_by => association_class_uniqueness_attributes)
+        clean_duplicate_docker_tags if @model_class == Katello::DockerTag
+      end
+      sync_content_index(association_tracker, additive)
+    end
 
-      clean_duplicate_docker_tags if @model_class == Katello::DockerTag
+    def sync_content_index(association_tracker, additive)
+      with_private_content_index do |index, association_class|
+        rows = association_tracker.content_index_values(index)
+        if additive && !association_class.exists?(:content_index_id => index.id)
+          copy_repository_rows_into_index(index)
+        end
+        if additive && duplicate_index_ids.any?
+          association_class.where(:content_index_id => index.id,
+                                  @model_class.unit_id_field => duplicate_index_ids).delete_all
+        end
+        unless additive
+          stale = association_class.where(:content_index_id => index.id)
+          # Generic subtypes share one model and one index table; prune only this pass's.
+          if @model_class == ::Katello::GenericContentUnit
+            stale = stale.where(:generic_content_unit_id =>
+                                  ::Katello::GenericContentUnit.where(:content_type => @content_type.label).select(:id))
+          end
+          stale.where.not(@model_class.unit_id_field => association_tracker.unit_ids).delete_all
+        end
+        association_class.upsert_all(rows, :unique_by => [@model_class.unit_id_field.to_sym, :content_index_id]) unless rows.empty?
+      end
+    end
+
+    # A delta pass sees only the new units, so it seeds from the repository rows.
+    def copy_repository_rows_into_index(index)
+      association_class = @model_class.content_index_association_class
+      source_table = @model_class.repository_association_class.table_name
+      columns = [@model_class.unit_id_field]
+      columns += ['erratum_pulp3_href', 'erratum_prn'] if association_class.column_names.include?('erratum_pulp3_href')
+
+      select_columns = columns.map { |column| "src.#{column}" }
+      association_class.connection.execute(
+        "insert into #{association_class.table_name} (content_index_id, #{columns.join(', ')}, created_at, updated_at) " \
+        "select #{index.id}, #{select_columns.join(', ')}, now(), now() from #{source_table} src " \
+        "where src.repository_id = #{@repository.id} on conflict do nothing"
+      )
+    end
+
+    def destroy_associations(repo_associations_to_destroy)
+      clean_filter_rules(repo_associations_to_destroy) if repo_associations_to_destroy.present? && [::Katello::ModuleStream, ::Katello::Erratum, ::Katello::PackageGroup].include?(@model_class)
+      repo_associations_to_destroy.destroy_all
     end
 
     def clean_filter_rules(repo_associations_to_destroy)
