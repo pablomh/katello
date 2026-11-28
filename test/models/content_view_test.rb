@@ -694,6 +694,46 @@ module Katello
       end
     end
 
+    def test_update_host_statuses_filters_by_root_ids
+      cv = katello_content_views(:acme_default)
+      env = katello_environments(:library)
+      facets = mock('facets')
+      ::Katello::Host::ContentFacet.stubs(:with_content_views).with(cv).returns(facets)
+      facets.stubs(:with_environments).with(env).returns(facets)
+      facets.expects(:joins).with(:bound_repositories).returns(facets)
+      facets.expects(:where).with(:katello_repositories => { :root_id => [1] }).returns(facets)
+      facets.expects(:distinct).returns(facets)
+      facets.expects(:find_each).with(:batch_size => 500)
+
+      cv.update_host_statuses(env, [1])
+    end
+
+    def test_update_host_statuses_with_an_empty_root_list_touches_no_facet
+      cv = katello_content_views(:acme_default)
+      env = katello_environments(:library)
+      facets = mock('facets')
+      ::Katello::Host::ContentFacet.stubs(:with_content_views).with(cv).returns(facets)
+      facets.stubs(:with_environments).with(env).returns(facets)
+      facets.stubs(:joins).with(:bound_repositories).returns(facets)
+      facets.stubs(:where).with(:katello_repositories => { :root_id => [] }).returns(facets)
+      facets.stubs(:distinct).returns(facets)
+      facets.expects(:find_each).with(:batch_size => 500)
+
+      cv.update_host_statuses(env, [])
+    end
+
+    def test_update_host_statuses_without_roots_uses_every_facet
+      cv = katello_content_views(:acme_default)
+      env = katello_environments(:library)
+      facets = mock('facets')
+      ::Katello::Host::ContentFacet.stubs(:with_content_views).with(cv).returns(facets)
+      facets.stubs(:with_environments).with(env).returns(facets)
+      facets.expects(:joins).never
+      facets.expects(:find_each).with(:batch_size => 500)
+
+      cv.update_host_statuses(env)
+    end
+
     def test_update_host_statuses_host_deleted
       other_location = taxonomies(:location2)
       facet = katello_content_facets(:content_facet_two)

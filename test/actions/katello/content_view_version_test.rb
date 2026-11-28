@@ -107,6 +107,7 @@ module ::Actions::Katello::ContentViewVersion
         ::Katello::Repository.any_instance.stubs(:soft_copy_of_library?).returns(true)
         action.expects(:plan_self).with do |input|
           input[:copy_action_outputs] == [] &&
+            input[:changed_repository_ids] == [] &&
             input[:adopted_repository_ids] == []
         end
 
@@ -131,6 +132,11 @@ module ::Actions::Katello::ContentViewVersion
         end
         assert_action_planned_with(action, ::Actions::Pulp3::Repository::CopyVersion, library_repo, SmartProxy.pulp_primary, new_repo)
         refute_action_planned(action, ::Actions::Pulp3::Repository::CopyContent)
+        reference = action.input[:changed_repository_ids].first
+        assert_instance_of Dynflow::ExecutionPlan::OutputReference, reference
+        persistence = mock
+        persistence.stubs(:adapter).returns(mock(:load_action => { :output => { 'updated_repositories' => [new_repo.id] } }))
+        assert_equal [new_repo.id], Dynflow::ExecutionPlan::OutputReference.dereference(reference, persistence)
         assert_action_planned_with(action, ::Actions::Katello::Repository::MetadataGenerate) do |plan_input|
           repo, options = plan_input
           repo == new_repo && options[:contents_changed].subkeys == ['changed_repositories', new_repo.id.to_s]

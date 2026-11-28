@@ -529,6 +529,37 @@ module ::Actions::Katello::ContentView
       refute_empty content_view_version.history
       assert_action_planned(action, Actions::Katello::ContentView::CapsuleSync)
     end
+
+    it 'schedules the host status refresh with the roots of the repositories it changed' do
+      action.stubs(:task).returns(success_task)
+      action.stubs(:sync_proxies?).returns(false)
+      repo = katello_repositories(:fedora_17_x86_64)
+
+      ForemanTasks.expects(:async_task).with(Actions::Katello::ContentView::UpdateHostStatus,
+                                             content_view_version.content_view, environment, [repo.root_id]).once
+      plan_action(action, content_view_version, environment, 'description', true, [repo.id])
+      action.trigger_post_tasks(nil)
+    end
+
+    it 'does not schedule the host status refresh when an incremental update changed nothing' do
+      action.stubs(:task).returns(success_task)
+      action.stubs(:sync_proxies?).returns(false)
+
+      ForemanTasks.expects(:async_task).with(Actions::Katello::ContentView::UpdateHostStatus,
+                                             content_view_version.content_view, environment, anything).never
+      plan_action(action, content_view_version, environment, 'description', true, [])
+      action.trigger_post_tasks(nil)
+    end
+
+    it 'schedules the host status refresh for every host of a plain promotion' do
+      action.stubs(:task).returns(success_task)
+      action.stubs(:sync_proxies?).returns(false)
+
+      ForemanTasks.expects(:async_task).with(Actions::Katello::ContentView::UpdateHostStatus,
+                                             content_view_version.content_view, environment).once
+      plan_action(action, content_view_version, environment, 'description')
+      action.trigger_post_tasks(nil)
+    end
   end
 
   class AddToEnvironmentTest < TestBase

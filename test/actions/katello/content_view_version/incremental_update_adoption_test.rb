@@ -240,6 +240,24 @@ module Actions::Katello::ContentViewVersion
         assert_equal [rpm_two.nvra], mock_output[:added_units][::Katello::Rpm::CONTENT_TYPE]
       end
 
+      it 'reports a copied repository without walking the whole version' do
+        action.input.update(:copy_action_outputs => [{ :pulp_tasks => [{}] }],
+                            :changed_repository_ids => [[new_repo.id]], :adopted_repository_ids => [])
+        action.run
+
+        assert_equal [rpm_two.nvra], mock_output[:added_units][::Katello::Rpm::CONTENT_TYPE]
+      end
+
+      it 'does not report repositories the update did not change' do
+        other_repo = katello_repositories(:rhel_6_x86_64)
+        other_repo.rpms = [katello_rpms(:three)]
+        new_version.stubs(:repositories).returns(::Katello::Repository.where(:id => [new_repo.id, other_repo.id]))
+
+        action.run
+
+        assert_equal [rpm_two.nvra], mock_output[:added_units][::Katello::Rpm::CONTENT_TYPE]
+      end
+
       it 'lists the adopted delta in the generated description' do
         action.run
         notes = +''
