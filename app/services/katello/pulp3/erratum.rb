@@ -2,6 +2,8 @@ module Katello
   module Pulp3
     class Erratum < PulpContentUnit
       include LazyAccessor
+      include YumContentUnit
+
       PULPCORE_CONTENT_TYPE = "rpm.advisory".freeze
 
       def self.content_api

@@ -21,6 +21,13 @@ module Katello
         /.*\/versions\/\d*\//.match(href)
       end
 
+      # Whether +version_href+ is the version created right after +previous_version_href+ in the same repository.
+      def self.next_version?(previous_version_href, version_href)
+        previous_repo, _, previous_number = previous_version_href.to_s.chomp('/').rpartition('/')
+        repo, _, number = version_href.to_s.chomp('/').rpartition('/')
+        previous_repo.present? && previous_repo == repo && number.to_i == previous_number.to_i + 1
+      end
+
       def self.publication_href?(href)
         href.include?('/publications/')
       end
@@ -149,6 +156,10 @@ module Katello
 
       def repository_reference
         RepositoryReference.find_by(:root_repository_id => repo.root_id, :content_view_id => repo.content_view.id)
+      end
+
+      def latest_version_href
+        api.repositories_api.read(repository_reference.repository_href).latest_version_href
       end
 
       def distribution_reference
@@ -388,6 +399,26 @@ module Katello
           tasks
         else
           copy_content_for_source(source_repository)
+        end
+      end
+
+      # Splits a copy whose configs exceed the subclass's UNIT_LIMIT into one request per destination
+      # slice. Only a destination's first slice keeps dest_base_version: Pulp builds every version
+      # carrying it on that base, so later slices build on the latest version instead, which is the
+      # previous slice's because Pulp runs tasks holding the same exclusive repository in creation order.
+      def copy_content_chunked(data)
+        return api.copy_api.copy_content(data) if data.config.sum { |config| config[:content].size } <= self.class::UNIT_LIMIT
+
+        seeded_dest_repos = Set.new
+        data.config.flat_map do |config|
+          config[:content].each_slice(self.class::UNIT_LIMIT).map do |slice|
+            chunk_config = config.merge(content: slice)
+            chunk_config.delete(:dest_base_version) unless seeded_dest_repos.add?(config[:dest_repo])
+            chunk = api.class.copy_class.new
+            chunk.dependency_solving = data.dependency_solving
+            chunk.config = [chunk_config]
+            api.copy_api.copy_content(chunk)
+          end
         end
       end
 

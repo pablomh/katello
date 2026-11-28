@@ -3,10 +3,26 @@ module Actions
     module Repository
       class SaveVersions < Pulp3::Abstract
         def plan(repository_ids, options)
-          plan_self(:repository_ids => repository_ids, :tasks => options[:tasks])
+          plan_self(:repository_ids => repository_ids, :tasks => options[:tasks],
+                    :additive_copy => options.fetch(:additive_copy, false),
+                    :seed_tasks => options.fetch(:seed_tasks, {}))
         end
 
         def run
+          if input[:additive_copy]
+            save_copied_versions
+          else
+            save_latest_versions
+          end
+        end
+
+        def save_copied_versions
+          output.merge!(contents_changed: false, updated_repositories: [], changed_repositories: {})
+          created_hrefs = Array(input[:tasks]).flat_map { |task| Array(task[:created_resources]) }
+          find_repositories(input[:repository_ids]).each { |repo| save_copied_version(repo, created_hrefs) }
+        end
+
+        def save_latest_versions
           return if input[:tasks].empty?
           version_hrefs = input[:tasks].last[:created_resources]
           repositories = find_repositories(input[:repository_ids])
@@ -46,6 +62,42 @@ module Actions
           end
         end
 
+        # The copy built each new version on the repository's saved version, so a repository the
+        # copy created no version for is unchanged, and the saved version's associations only need
+        # the difference applied.
+        def save_copied_version(repo, created_hrefs)
+          repo_backend_service = repo.backend_service(SmartProxy.pulp_primary)
+          repository_href = repo_backend_service.repository_reference&.repository_href
+          created = repository_href ? created_hrefs.select { |href| href.start_with?(repository_href) }.uniq : []
+          output[:changed_repositories][repo.id.to_s] = created.any?
+          return if created.empty?
+
+          new_version_href = created.max_by { |href| href.split('/')[-1].to_i }
+          previous_version_href = repo.version_href
+          previous_version_prn = repo.version_prn
+          version = repo_backend_service.api.repository_versions_api.read(new_version_href, {fields: 'prn'})
+          repo.update(version_href: new_version_href, version_prn: version.prn)
+          begin
+            repo.index_content(changed_from: seed_version_href(repo, new_version_href) || previous_version_href)
+          rescue StandardError
+            # A retry only indexes a repository whose version changed.
+            repo.update_columns(version_href: previous_version_href, version_prn: previous_version_prn)
+            raise
+          end
+          output[:contents_changed] = true
+          output[:updated_repositories] << repo.id
+        end
+
+        # A seed holds exactly the content the saved version's associations describe, so a copy
+        # version right after it is indexed as a single-step delta.
+        def seed_version_href(repo, new_version_href)
+          seed_tasks = (input[:seed_tasks] || {})[repo.id.to_s]
+          return if seed_tasks.blank?
+
+          seed_href = ::Katello::Pulp3::Task.version_href(seed_tasks)
+          seed_href if ::Katello::Pulp3::Repository.next_version?(seed_href, new_version_href)
+        end
+
         def version_map(version_hrefs)
           version_map = {}
           version_hrefs.each do |href|
@@ -55,8 +107,7 @@ module Actions
         end
 
         def latest_version_href(repo_backend_service)
-          repo_backend_service.api.repositories_api.
-            read(repo_backend_service.repository_reference.repository_href).latest_version_href
+          repo_backend_service.latest_version_href
         end
 
         def find_repositories(repository_ids)
