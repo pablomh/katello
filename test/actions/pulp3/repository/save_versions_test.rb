@@ -149,4 +149,105 @@ module ::Actions::Pulp3::Repository
     end
     # rubocop:enable Metrics/AbcSize
   end
+
+  class SaveVersionsAdditiveCopyTest < ActiveSupport::TestCase
+    CV_REPO = "/pulp/api/v3/repositories/file/file/cv/".freeze
+    LIBRARY_VERSION = "/pulp/api/v3/repositories/file/file/library/versions/7/".freeze
+
+    def setup
+      @repo1 = katello_repositories(:generic_file_archive)
+    end
+
+    def stub_version_prn(href)
+      version = mock('version')
+      version.stubs(:prn).returns("prn:core.repositoryversion:#{href}")
+      versions_api = mock('repository_versions_api')
+      versions_api.stubs(:read).with(href, {fields: 'prn'}).returns(version)
+      Katello::Pulp3::Api::File.any_instance.stubs(:repository_versions_api).returns(versions_api)
+    end
+
+    def save_reference(repo, href)
+      ::Katello::Pulp3::RepositoryReference.new(repository_href: href, root_repository_id: repo.root_id,
+                                                content_view_id: repo.content_view.id).save
+    end
+
+    def test_additive_copy_indexes_changes_from_saved_version
+      @repo1.update(version_href: "library_repo/7/")
+      save_reference(@repo1, "test_repo_1/")
+      stub_version_prn("test_repo_1/3/")
+      @repo1.class.any_instance.expects(:index_content).with(changed_from: "library_repo/7/")
+
+      task = ForemanTasks.sync_task(::Actions::Pulp3::Repository::SaveVersions, [@repo1.id],
+                                    tasks: [{ created_resources: ["test_repo_1/3/", "other_repo/2/"] }], additive_copy: true)
+
+      assert_equal "test_repo_1/3/", @repo1.reload.version_href
+      assert task.output[:contents_changed]
+      assert_equal({ @repo1.id.to_s => true }, task.output[:changed_repositories])
+    end
+
+    def test_additive_copy_without_new_version_leaves_repository_unchanged
+      @repo1.update(version_href: "library_repo/7/")
+      save_reference(@repo1, "test_repo_1/")
+      ::PulpFileClient::RepositoriesFileApi.any_instance.expects(:read).never
+      @repo1.class.any_instance.expects(:index_content).never
+
+      task = ForemanTasks.sync_task(::Actions::Pulp3::Repository::SaveVersions, [@repo1.id],
+                                    tasks: [{ created_resources: ["other_repo/2/"] }], additive_copy: true)
+
+      assert_equal "library_repo/7/", @repo1.reload.version_href
+      refute task.output[:contents_changed]
+      assert_equal({ @repo1.id.to_s => false }, task.output[:changed_repositories])
+    end
+
+    def test_additive_copy_with_several_versions_indexes_from_saved_version
+      @repo1.update(version_href: "test_repo_1/1/")
+      save_reference(@repo1, "test_repo_1/")
+      stub_version_prn("test_repo_1/3/")
+      @repo1.class.any_instance.expects(:index_content).with(changed_from: "test_repo_1/1/")
+
+      ForemanTasks.sync_task(::Actions::Pulp3::Repository::SaveVersions, [@repo1.id],
+                             tasks: [{ created_resources: ["test_repo_1/2/"] }, { created_resources: ["test_repo_1/3/"] }],
+                             additive_copy: true)
+
+      assert_equal "test_repo_1/3/", @repo1.reload.version_href
+    end
+
+    def test_additive_copy_restores_version_when_indexing_fails
+      @repo1.update(version_href: "test_repo_1/1/", version_prn: "prn:old")
+      save_reference(@repo1, "test_repo_1/")
+      stub_version_prn("test_repo_1/2/")
+      @repo1.class.any_instance.expects(:index_content).raises(StandardError, "boom")
+
+      assert_raises(ForemanTasks::TaskError) do
+        ForemanTasks.sync_task(::Actions::Pulp3::Repository::SaveVersions, [@repo1.id],
+                               tasks: [{ created_resources: ["test_repo_1/2/"] }], additive_copy: true)
+      end
+
+      @repo1.reload
+      assert_equal "test_repo_1/1/", @repo1.version_href
+      assert_equal "prn:old", @repo1.version_prn
+    end
+
+    def test_additive_copy_indexes_from_the_seed_it_directly_follows
+      @repo1.update(version_href: LIBRARY_VERSION)
+      save_reference(@repo1, CV_REPO)
+      stub_version_prn("#{CV_REPO}versions/4/")
+      @repo1.class.any_instance.expects(:index_content).with(changed_from: "#{CV_REPO}versions/3/")
+
+      ForemanTasks.sync_task(::Actions::Pulp3::Repository::SaveVersions, [@repo1.id],
+                             tasks: [{ created_resources: ["#{CV_REPO}versions/4/"] }], additive_copy: true,
+                             seed_tasks: { @repo1.id.to_s => [{ created_resources: ["#{CV_REPO}versions/3/"] }] })
+    end
+
+    def test_additive_copy_ignores_a_seed_it_does_not_directly_follow
+      @repo1.update(version_href: LIBRARY_VERSION)
+      save_reference(@repo1, CV_REPO)
+      stub_version_prn("#{CV_REPO}versions/5/")
+      @repo1.class.any_instance.expects(:index_content).with(changed_from: LIBRARY_VERSION)
+
+      ForemanTasks.sync_task(::Actions::Pulp3::Repository::SaveVersions, [@repo1.id],
+                             tasks: [{ created_resources: ["#{CV_REPO}versions/5/"] }], additive_copy: true,
+                             seed_tasks: { @repo1.id.to_s => [{ created_resources: ["#{CV_REPO}versions/3/"] }] })
+    end
+  end
 end
