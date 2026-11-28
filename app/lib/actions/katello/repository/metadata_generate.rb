@@ -17,11 +17,13 @@ module Actions
             ::Katello::Validators::RepositoryContainerPathValidator.validate_existing!(repository, user: ::User.current)
           end
 
-          plan_action(Pulp3::Orchestration::Repository::GenerateMetadata,
-                        repository, smart_proxy,
-                        :force_publication => force_publication,
-                        :source_repository => source_repository,
-                        :matching_content => matching_content)
+          generate_options = { :force_publication => force_publication,
+                               :source_repository => source_repository,
+                               :matching_content => matching_content }
+          generate_options.merge!(options.slice(:reuse_version, :source_version_href, :source_version_prn,
+                                                :source_publication_href, :source_publication_prn,
+                                                :source_content_index_id))
+          plan_action(Pulp3::Orchestration::Repository::GenerateMetadata, repository, smart_proxy, generate_options)
 
           if repository.deb? && repository.content && !repository.content.content_url.end_with?(repository.deb_content_url_options)
             plan_action(::Actions::Candlepin::Product::ContentUpdate,

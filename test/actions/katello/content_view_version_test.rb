@@ -102,6 +102,20 @@ module ::Actions::Katello::ContentViewVersion
         Dynflow::ExecutionPlan::OutputReference.new('1', 2, 3)
       end
 
+      it 'plans nothing when the selection resolves to no copyable content' do
+        pulp3_cvv_setup
+        ::Katello::Repository.any_instance.stubs(:soft_copy_of_library?).returns(true)
+        action.expects(:plan_self).with do |input|
+          input[:copy_action_outputs] == [] &&
+            input[:adopted_repository_ids] == []
+        end
+
+        plan_action(action, content_view_version, [library],
+                    :resolve_dependencies => false, :content => {:package_ids => [999_999_999]})
+
+        refute_action_planned(action, ::Actions::Pulp3::Repository::MultiCopyUnits)
+      end
+
       it 'respects dep solving false' do
         pulp3_cvv_setup
         ::Katello::RepositoryRpm.create!(:repository_id => library_repo.id, :rpm_id => old_rpm.id)

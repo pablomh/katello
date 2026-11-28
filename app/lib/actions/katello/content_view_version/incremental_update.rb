@@ -14,6 +14,26 @@ module Actions
           ::Katello::Deb::CONTENT_TYPE => "Deb Packages",
         }.freeze
 
+        # nil: the type may not grow for the library version to be adoptable.
+        ADOPTION_UNIT_TYPES = {
+          ::Katello::Rpm => :package_ids,
+          ::Katello::Erratum => :errata_ids,
+          ::Katello::Deb => :deb_ids,
+          ::Katello::Srpm => nil,
+          ::Katello::ModuleStream => nil,
+          ::Katello::FileUnit => nil,
+          ::Katello::PackageGroup => nil,
+          ::Katello::AnsibleCollection => nil,
+          ::Katello::GenericContentUnit => nil,
+        }.freeze
+
+        # What planning the unit copy for one mapping produced.
+        UnitCopyPlan = Struct.new(:copy_output, :adopted_repository_ids) do
+          def self.empty
+            new(nil, [])
+          end
+        end
+
         def humanized_name
           _("Incremental Update")
         end
@@ -64,8 +84,10 @@ module Actions
                                                             :status => ::Katello::ContentViewHistory::IN_PROGRESS, :task => self.task,
                                                             :notes => description)
 
-            copy_outputs = []
+            unit_copy_plans = []
             repos_to_clone = repos_to_copy(old_version, new_components)
+            changed_root_ids = content_root_ids(content)
+            adoptable_library_repos = adoptable_library_repos(repos_to_clone, changed_root_ids, content, dep_solve)
 
             sequence do
               repository_mapping = plan_action(ContentViewVersion::CreateRepos, new_content_view_version, repos_to_clone).repository_mapping
@@ -84,16 +106,20 @@ module Actions
               concurrence do
                 [:pulp3_deb_multicopy, :pulp3_yum_multicopy].each do |mapping|
                   next if separated_repo_map[mapping].empty?
-                  copy_output = plan_unit_copy(separated_repo_map[mapping], old_version, content, dep_solve)
-                  copy_outputs << copy_output if copy_output
+                  unit_copy_plans << plan_unit_copy(separated_repo_map[mapping], old_version, content,
+                                                    dep_solve, adoptable_library_repos)
                 end
               end
+
+              copy_action_outputs = unit_copy_plans.map(&:copy_output).compact
+              adopted_repository_ids = unit_copy_plans.flat_map(&:adopted_repository_ids)
 
               plan_self(:content_view_id => old_version.content_view.id,
                         :new_content_view_version_id => self.new_content_view_version.id,
                         :environment_ids => environments.map(&:id), :user_id => ::User.current.id,
-                        :history_id => history.id, :copy_action_outputs => copy_outputs,
+                        :history_id => history.id, :copy_action_outputs => copy_action_outputs,
                         :old_version => old_version.id,
+                        :adopted_repository_ids => adopted_repository_ids,
                         :propagated_composite_cv_ids => propagated_composite_cv_ids)
               promote(new_content_view_version, environments)
             end
@@ -119,17 +145,24 @@ module Actions
         end
 
         # Copies the selected units into the clones holding them, then republishes the clones the copy
-        # changed.
-        def plan_unit_copy(repo_map, old_version, content, dep_solve)
+        # changed. A root whose base plus the selection is exactly the library adopts the library's
+        # version instead of building an identical one.
+        def plan_unit_copy(repo_map, old_version, content, dep_solve, adoptable_library_repos)
           unit_map = pulp3_content_mapping(content)
-          return if unit_map.values.flatten.empty?
+          return UnitCopyPlan.empty if unit_map.values.flatten.empty?
 
+          adoptable_pairs, copy_pairs = repo_map.partition do |_source_repos, dest_repo|
+            adoptable_library_repos.key?(dest_repo.root_id)
+          end
+          adoptable_map = adoptable_pairs.to_h
+          copy_map = copy_pairs.to_h
           # Dependency solving can pull units into a repository that holds none of the selected ones.
-          extended_repo_mapping = pulp3_repo_mapping(repo_map, old_version, dep_solve ? nil : unit_map)
+          extended_repo_mapping = pulp3_repo_mapping(copy_map, old_version, dep_solve ? nil : unit_map)
 
           dest_repo_ids = extended_repo_mapping.values.pluck(:dest_repo).to_set
-          copy_targets = repo_map.select { |_source_repos, dest_repo| dest_repo_ids.include?(dest_repo.id) }
+          copy_targets = copy_map.select { |_source_repos, dest_repo| dest_repo_ids.include?(dest_repo.id) }
           copy_output = nil
+          adopted_repository_ids = []
           seed_tasks = {}
           sequence do
             copy_targets.each do |source_repos, dest_repo|
@@ -147,8 +180,12 @@ module Actions
               end
               copy_output = copy_action.output
             end
+            adoptable_map.each_value do |dest_repo|
+              adopted_repository_ids << dest_repo.id
+              plan_adoption(dest_repo, adoptable_library_repos[dest_repo.root_id])
+            end
           end
-          copy_output
+          UnitCopyPlan.new(copy_output, adopted_repository_ids)
         end
 
         # The copy's version must directly follow one holding exactly the base, so its delta can be
@@ -158,6 +195,20 @@ module Actions
           return false if dest_repo.version_href.blank?
           dest_repo.soft_copy_of_library? ||
             dest_repo.version_href != dest_repo.backend_service(SmartProxy.pulp_primary).latest_version_href
+        end
+
+        # Taking over a version takes over its publication and index, so the clone needs no copy.
+        # The caller's sequence orders the metadata takeover before the index copy.
+        def plan_adoption(new_repo, library_repo)
+          plan_action(Katello::Repository::MetadataGenerate, new_repo,
+                      :source_repository => library_repo, :reuse_version => true,
+                      :source_version_href => library_repo.version_href,
+                      :source_version_prn => library_repo.version_prn,
+                      :source_publication_href => library_repo.publication_href,
+                      :source_publication_prn => library_repo.publication_prn,
+                      :source_content_index_id => library_repo.current_content_index&.id)
+          plan_action(Katello::Repository::IndexContent, :id => new_repo.id, :force_index => true,
+                      :source_repository_id => library_repo.id)
         end
 
         def pulp3_repo_mapping(repo_mapping, old_version, selected_units = nil)
@@ -188,6 +239,107 @@ module Actions
           ::Katello::RepositoryRpm.where(repository_id: repository.id, rpm_id: unit_map[:rpms]).exists? ||
             ::Katello::RepositoryErratum.where(repository_id: repository.id, erratum_id: unit_map[:errata]).exists? ||
             ::Katello::RepositoryDeb.where(repository_id: repository.id, deb_id: unit_map[:debs]).exists?
+        end
+
+        # Dependency solving can pull units the request did not name, which breaks the proof.
+        def adoptable_library_repos(repos_to_clone, changed_root_ids, content, dep_solve)
+          return {} if dep_solve
+          selected_ids = selected_unit_ids(content)
+          errata_packages = errata_package_ids(selected_ids[:errata_ids])
+
+          repos_to_clone.each_with_object({}) do |source_repos, adoptable|
+            base_repo = source_repos.first
+            next unless source_repos.size == 1
+            next unless changed_root_ids.include?(base_repo.root_id)
+            library_repo = base_repo.library_instance
+            next if library_repo.nil?
+
+            # The proof must read the index of the version being handed over.
+            base_index = base_repo.current_content_index
+            library_index = library_repo.current_content_index
+            next if base_index.nil? || library_index.nil?
+            next unless reusable_source?(library_repo)
+
+            selected = selected_ids.merge(:package_ids => selected_ids[:package_ids] +
+                                                          indexed_package_ids(library_index, errata_packages))
+            next unless library_matches_delta?(base_index.id, library_index.id, selected)
+            adoptable[base_repo.root_id] = library_repo
+          end
+        end
+
+        def reusable_source?(repository)
+          repository.version_href.present? && repository.publication_href.present?
+        end
+
+        def library_matches_delta?(base_index_id, library_index_id, selected_ids)
+          return false if base_index_id == library_index_id
+
+          ADOPTION_UNIT_TYPES.all? do |unit_class, selected_key|
+            association_class = unit_class.content_index_association_class
+            next true if association_class.nil?
+
+            unit_id_field = unit_class.unit_id_field
+            base_units = association_class.where(:content_index_id => base_index_id)
+            library_units = association_class.where(:content_index_id => library_index_id)
+            next false if base_units.where.not(unit_id_field => library_units.select(unit_id_field)).exists?
+
+            # The copy intersects the selection with the library version, so a
+            # selected unit the library does not hold cannot reach the new version.
+            added = library_units.where.not(unit_id_field => base_units.select(unit_id_field))
+            next !added.exists? if selected_key.nil?
+            !added.where.not(unit_id_field => selected_ids[selected_key]).exists?
+          end
+        end
+
+        # The request names units by database id or Pulp identifier; the association
+        # tables key on ids.
+        def selected_unit_ids(content)
+          {
+            :package_ids => unit_ids(::Katello::Rpm, content[:package_ids]),
+            :errata_ids => unit_ids(::Katello::Erratum, content[:errata_ids]),
+            :deb_ids => unit_ids(::Katello::Deb, content[:deb_ids]),
+          }
+        end
+
+        def unit_ids(unit_class, identifiers)
+          return [] if Array(identifiers).empty?
+
+          unit_class.with_identifiers(identifiers).pluck(:id)
+        end
+
+        # Selecting an erratum brings the packages the advisory references.
+        def errata_package_ids(errata_ids)
+          return [] if errata_ids.empty?
+
+          filenames = ::Katello::ErratumPackage.joins(:erratum).
+            where("#{::Katello::Erratum.table_name}.id" => errata_ids).pluck(:filename).compact.uniq
+          return [] if filenames.empty?
+
+          ::Katello::Rpm.where(:filename => filenames).pluck(:id)
+        end
+
+        # Only the library's own rows can be copied from it; a same-filename
+        # build in another content set must not enter the selection.
+        def indexed_package_ids(library_index, package_ids)
+          return [] if package_ids.empty?
+
+          ::Katello::ContentIndexRpm.
+            where(:content_index_id => library_index.id, :rpm_id => package_ids).pluck(:rpm_id)
+        end
+
+        def content_root_ids(content)
+          ids = selected_unit_ids(content)
+          root_ids = root_ids_for(::Katello::Rpm, ids[:package_ids])
+          root_ids += root_ids_for(::Katello::Erratum, ids[:errata_ids])
+          root_ids += root_ids_for(::Katello::Deb, ids[:deb_ids])
+          root_ids.uniq
+        end
+
+        def root_ids_for(unit_class, unit_ids)
+          return [] if unit_ids.empty?
+
+          unit_class.repository_association_class.joins(:repository).
+            where(unit_class.unit_id_field => unit_ids).pluck('katello_repositories.root_id')
         end
 
         def repos_to_copy(old_version, new_components)
@@ -258,7 +410,7 @@ module Actions
           new_repos = version.repositories
 
           copied = input[:copy_action_outputs].present? && input[:copy_action_outputs].last[:pulp_tasks].present?
-          if input[:is_composite] || copied
+          if input[:is_composite] || copied || input[:adopted_repository_ids].present?
             new_repos.each do |new_repo|
               matched_old_repo = base_repos.where(root_id: new_repo.root_id).first
 
