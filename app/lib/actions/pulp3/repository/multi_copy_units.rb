@@ -2,6 +2,8 @@ module Actions
   module Pulp3
     module Repository
       class MultiCopyUnits < Pulp3::AbstractAsyncTask
+        attr_reader :save_versions_output
+
         # repo_map example: {
         #   [<source_repo_ids>]: {
         #     dest_repo: <dest_repo_id>,
@@ -15,8 +17,10 @@ module Actions
                       dependency_solving: options[:dependency_solving],
                       incremental_update: options[:incremental_update],
                       smart_proxy_id: SmartProxy.pulp_primary.id).output
-            plan_action(Pulp3::Repository::SaveVersions, repo_map.values.pluck(:dest_repo),
-                        tasks: action_output[:pulp_tasks]).output
+            @save_versions_output = plan_action(Pulp3::Repository::SaveVersions, repo_map.values.pluck(:dest_repo),
+                                                tasks: action_output[:pulp_tasks],
+                                                additive_copy: options.fetch(:incremental_update, false),
+                                                seed_tasks: options.fetch(:seed_tasks, {})).output
           end
         end
 
