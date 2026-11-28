@@ -28,9 +28,9 @@ module Actions
         }.freeze
 
         # What planning the unit copy for one mapping produced.
-        UnitCopyPlan = Struct.new(:copy_output, :adopted_repository_ids) do
+        UnitCopyPlan = Struct.new(:copy_output, :changed_repository_refs, :adopted_repository_ids) do
           def self.empty
-            new(nil, [])
+            new(nil, [], [])
           end
         end
 
@@ -112,6 +112,7 @@ module Actions
               end
 
               copy_action_outputs = unit_copy_plans.map(&:copy_output).compact
+              changed_repository_refs = unit_copy_plans.flat_map(&:changed_repository_refs)
               adopted_repository_ids = unit_copy_plans.flat_map(&:adopted_repository_ids)
 
               plan_self(:content_view_id => old_version.content_view.id,
@@ -119,9 +120,10 @@ module Actions
                         :environment_ids => environments.map(&:id), :user_id => ::User.current.id,
                         :history_id => history.id, :copy_action_outputs => copy_action_outputs,
                         :old_version => old_version.id,
+                        :changed_repository_ids => changed_repository_refs,
                         :adopted_repository_ids => adopted_repository_ids,
                         :propagated_composite_cv_ids => propagated_composite_cv_ids)
-              promote(new_content_view_version, environments)
+              promote(new_content_view_version, environments, changed_repository_refs)
             end
           end
         end
@@ -162,6 +164,7 @@ module Actions
           dest_repo_ids = extended_repo_mapping.values.pluck(:dest_repo).to_set
           copy_targets = copy_map.select { |_source_repos, dest_repo| dest_repo_ids.include?(dest_repo.id) }
           copy_output = nil
+          changed_repository_refs = []
           adopted_repository_ids = []
           seed_tasks = {}
           sequence do
@@ -178,14 +181,16 @@ module Actions
                 plan_action(Katello::Repository::MetadataGenerate, dest_repo,
                             contents_changed: copy_action.save_versions_output[:changed_repositories][dest_repo.id.to_s])
               end
+              changed_repository_refs << copy_action.save_versions_output[:updated_repositories]
               copy_output = copy_action.output
             end
             adoptable_map.each_value do |dest_repo|
+              changed_repository_refs << dest_repo.id
               adopted_repository_ids << dest_repo.id
               plan_adoption(dest_repo, adoptable_library_repos[dest_repo.root_id])
             end
           end
-          UnitCopyPlan.new(copy_output, adopted_repository_ids)
+          UnitCopyPlan.new(copy_output, changed_repository_refs, adopted_repository_ids)
         end
 
         # The copy's version must directly follow one holding exactly the base, so its delta can be
@@ -406,22 +411,28 @@ module Actions
                       ::Katello::Deb::CONTENT_TYPE => [],
                     }
 
-          base_repos = ::Katello::ContentViewVersion.find(input[:old_version]).repositories
-          new_repos = version.repositories
-
+          old_version = ::Katello::ContentViewVersion.find(input[:old_version])
+          base_repos = old_version.repositories.index_by(&:root_id)
           copied = input[:copy_action_outputs].present? && input[:copy_action_outputs].last[:pulp_tasks].present?
-          if input[:is_composite] || copied || input[:adopted_repository_ids].present?
-            new_repos.each do |new_repo|
-              matched_old_repo = base_repos.where(root_id: new_repo.root_id).first
 
-              content[::Katello::Erratum::CONTENT_TYPE] += added_units(new_repo, matched_old_repo, :errata).pluck(:errata_id)
-              added_units(new_repo, matched_old_repo, :module_streams).each do |module_stream|
-                content[::Katello::ModuleStream::CONTENT_TYPE] <<
-                  "#{module_stream.name}:#{module_stream.stream}:#{module_stream.version}"
-              end
-              content[::Katello::Rpm::CONTENT_TYPE] += added_units(new_repo, matched_old_repo, :rpms).map(&:nvra)
-              content[::Katello::Deb::CONTENT_TYPE] += added_units(new_repo, matched_old_repo, :debs).map(&:nva)
+          report_repositories =
+            if input[:is_composite]
+              version.repositories
+            elsif copied || input[:adopted_repository_ids].present?
+              changed_ids = Array(input[:changed_repository_ids]).flatten.compact
+              version.repositories.where(:id => changed_ids | Array(input[:adopted_repository_ids]))
             end
+
+          report_repositories&.each do |new_repo|
+            matched_old_repo = base_repos[new_repo.root_id]
+
+            content[::Katello::Erratum::CONTENT_TYPE] += added_units(new_repo, matched_old_repo, :errata).pluck(:errata_id)
+            added_units(new_repo, matched_old_repo, :module_streams).each do |module_stream|
+              content[::Katello::ModuleStream::CONTENT_TYPE] <<
+                "#{module_stream.name}:#{module_stream.stream}:#{module_stream.version}"
+            end
+            content[::Katello::Rpm::CONTENT_TYPE] += added_units(new_repo, matched_old_repo, :rpms).map(&:nvra)
+            content[::Katello::Deb::CONTENT_TYPE] += added_units(new_repo, matched_old_repo, :debs).map(&:nva)
           end
           output[:added_units] = content
         end
@@ -505,8 +516,9 @@ module Actions
           fail _("Incremental update will not add any new content. The specified content is already present.")
         end
 
-        def promote(new_version, environments)
-          plan_action(Katello::ContentView::Promote, new_version, environments, true, nil, true)
+        def promote(new_version, environments, changed_repository_ids)
+          plan_action(Katello::ContentView::Promote, new_version, environments, true, nil,
+                      :incremental_update => true, :changed_repository_ids => changed_repository_ids)
         end
 
         def plan_copy(action_class, source_repo, target_repo, clauses = nil, override_config = nil)

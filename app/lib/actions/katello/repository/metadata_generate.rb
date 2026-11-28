@@ -20,6 +20,8 @@ module Actions
           generate_options = { :force_publication => force_publication,
                                :source_repository => source_repository,
                                :matching_content => matching_content }
+          generate_options[:contents_changed] = options[:contents_changed] if options.key?(:contents_changed)
+          generate_options[:assume_content_guard_exists] = options[:assume_content_guard_exists] if options.key?(:assume_content_guard_exists)
           generate_options.merge!(options.slice(:reuse_version, :source_version_href, :source_version_prn,
                                                 :source_publication_href, :source_publication_prn,
                                                 :source_content_index_id))

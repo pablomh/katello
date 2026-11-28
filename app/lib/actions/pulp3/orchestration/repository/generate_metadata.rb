@@ -6,24 +6,30 @@ module Actions
           def plan(repository, smart_proxy, options = {})
             force_publication = options.fetch(:force_publication, repository.publication_href.nil?)
             options[:contents_changed] = options.key?(:contents_changed) ? options[:contents_changed] : true
+            assume_content_guard_exists = options.fetch(:assume_content_guard_exists, false)
             publication_content_type = !::Katello::RepositoryTypeManager.find(repository.content_type).pulp3_skip_publication
+            refresh_contents_changed = options[:contents_changed]
 
             sequence do
               if options[:source_repository] && publication_content_type
-                plan_self(source_repository_id: options[:source_repository].id, target_repository_id: repository.id,
+                action = plan_self(source_repository_id: options[:source_repository].id, target_repository_id: repository.id,
                           smart_proxy_id: smart_proxy.id, reuse_version: options[:reuse_version],
                           source_version_href: options[:source_version_href],
                           source_version_prn: options[:source_version_prn],
                           source_publication_href: options[:source_publication_href],
                           source_publication_prn: options[:source_publication_prn],
                           source_content_index_id: options[:source_content_index_id])
+                refresh_contents_changed = action.output[:publication_changed]
               elsif publication_content_type && (force_publication || repository.publication_href.nil? || !repository.using_mirrored_metadata?)
                 plan_action(Actions::Pulp3::Repository::CreatePublication, repository, smart_proxy, options)
               elsif !publication_content_type
                 plan_self(target_repository_id: repository.id, contents_changed: options[:contents_changed], skip_publication: true)
               end
-              plan_action(Actions::Pulp3::ContentGuard::Refresh, smart_proxy) unless repository.unprotected
-              plan_action(Actions::Pulp3::Repository::RefreshDistribution, repository, smart_proxy, :contents_changed => options[:contents_changed]) if Setting[:distribute_archived_cvv] || repository.environment
+              plan_action(Actions::Pulp3::ContentGuard::Refresh, smart_proxy) unless repository.unprotected || assume_content_guard_exists
+              if Setting[:distribute_archived_cvv] || repository.environment
+                plan_action(Actions::Pulp3::Repository::RefreshDistribution, repository, smart_proxy,
+                            :contents_changed => refresh_contents_changed, :assume_content_guard_exists => true)
+              end
             end
           end
 
@@ -39,6 +45,8 @@ module Actions
               # between plan and run must not hand over unproven content.
               publication_href = input[:source_publication_href] || source_repo.publication_href
               publication_prn = input[:source_publication_prn] || source_repo.publication_prn
+              output[:publication_changed] = target_repo.publication_href != publication_href ||
+                                              !target_repo.distribution_references.exists?
               if target_repo.publication_href != publication_href && smart_proxy.pulp_primary?
                 target_repo.clear_smart_proxy_sync_histories
               end

@@ -10,13 +10,13 @@ module Actions
           ::Katello::HOST_TASKS_QUEUE
         end
 
-        def plan(content_view, environment)
-          plan_self(:content_view_id => content_view.id, :environment_id => environment.id)
+        def plan(content_view, environment, root_ids = nil)
+          plan_self(:content_view_id => content_view.id, :environment_id => environment.id, :root_ids => root_ids)
         end
 
         def run
           environment = ::Katello::KTEnvironment.find(input[:environment_id])
-          ::Katello::ContentView.find(input[:content_view_id]).update_host_statuses(environment)
+          ::Katello::ContentView.find(input[:content_view_id]).update_host_statuses(environment, input[:root_ids])
         end
       end
     end
