@@ -159,7 +159,7 @@ module Katello
 
       def with_identifiers(ids)
         ids = [ids] unless ids.is_a?(Array)
-        ids.map!(&:to_s)
+        ids = ids.map(&:to_s)
         id_integers = ids.map { |string| Integer(string) rescue -1 }
         where("#{self.table_name}.id in (?) or #{self.table_name}.pulp_id in (?)", id_integers, ids)
       end
