@@ -60,8 +60,9 @@ module ::Actions::Katello::ContentViewVersion
       action.expects(:action_subject).with(content_view_version.content_view)
       plan_action(action, content_view_version, [library], :content => {:package_ids => [@rpm.id]})
 
-      assert_action_planned_with(action, ::Actions::Katello::Repository::MetadataGenerate, new_repo)
-      assert_action_planned_with(action, ::Actions::Katello::Repository::IndexContent, id: new_repo.id)
+      assert_action_planned(action, ::Actions::Katello::Repository::CloneToVersion)
+      refute_action_planned(action, ::Actions::Katello::Repository::MetadataGenerate)
+      refute_action_planned(action, ::Actions::Katello::Repository::IndexContent)
     end
 
     describe 'pulp3' do
@@ -94,27 +95,49 @@ module ::Actions::Katello::ContentViewVersion
         task = ForemanTasks::Task::DynflowTask.create!(state: :success, result: "good")
         action.stubs(:task).returns(task)
         action.expects(:action_subject).with(content_view_version.content_view)
+        Dynflow::Testing::DummyPlannedAction.any_instance.stubs(:save_versions_output).returns(save_versions_output)
+      end
+
+      let(:save_versions_output) do
+        Dynflow::ExecutionPlan::OutputReference.new('1', 2, 3)
       end
 
       it 'respects dep solving false' do
         pulp3_cvv_setup
+        ::Katello::RepositoryRpm.create!(:repository_id => library_repo.id, :rpm_id => old_rpm.id)
         ::Katello::Repository.any_instance.stubs(:soft_copy_of_library?).returns(true)
         plan_action(action, content_view_version, [library], :resolve_dependencies => false, :content => {:package_ids => [old_rpm.id]})
 
         pulp3_repo_map = {}
         pulp3_repo_map[[library_repo.id]] = { :dest_repo => new_repo.id, :base_version => nil }
-        assert_action_planned_with(action, ::Actions::Pulp3::Repository::MultiCopyUnits,
-                                  pulp3_repo_map,
-                                  { :debs => [], :errata => [], :rpms => [old_rpm.id] },
-                                  :dependency_solving => false)
-        assert_action_planned_with(action, ::Actions::Pulp3::Repository::CopyContent, library_repo, SmartProxy.pulp_primary, new_repo, copy_all: true, remove_all: true)
-        assert_action_planned_with(action, ::Actions::Katello::Repository::MetadataGenerate, new_repo)
-        assert_action_planned_with(action, ::Actions::Katello::Repository::IndexContent, id: new_repo.id)
+        assert_action_planned_with(action, ::Actions::Pulp3::Repository::MultiCopyUnits) do |repo_map, unit_map, options|
+          repo_map == pulp3_repo_map && unit_map == { :debs => [], :errata => [], :rpms => [old_rpm.id] } &&
+            options[:dependency_solving] == false && options[:incremental_update] &&
+            options[:seed_tasks].keys == [new_repo.id.to_s]
+        end
+        assert_action_planned_with(action, ::Actions::Pulp3::Repository::CopyVersion, library_repo, SmartProxy.pulp_primary, new_repo)
+        refute_action_planned(action, ::Actions::Pulp3::Repository::CopyContent)
+        assert_action_planned_with(action, ::Actions::Katello::Repository::MetadataGenerate) do |plan_input|
+          repo, options = plan_input
+          repo == new_repo && options[:contents_changed].subkeys == ['changed_repositories', new_repo.id.to_s]
+        end
+        refute_action_planned(action, ::Actions::Katello::Repository::IndexContent)
+      end
+
+      it 'skips repositories holding none of the selected units' do
+        pulp3_cvv_setup
+        ::Katello::Repository.any_instance.stubs(:soft_copy_of_library?).returns(true)
+        plan_action(action, content_view_version, [library], :resolve_dependencies => false, :content => {:package_ids => [old_rpm.id]})
+
+        refute_action_planned(action, ::Actions::Pulp3::Repository::MultiCopyUnits)
+        refute_action_planned(action, ::Actions::Pulp3::Repository::CopyVersion)
+        refute_action_planned(action, ::Actions::Katello::Repository::MetadataGenerate)
       end
 
       it 'respects dep solving true' do
         pulp3_cvv_setup
         ::Katello::Repository.any_instance.stubs(:soft_copy_of_library?).returns(false)
+        ::Katello::Pulp3::Repository.any_instance.stubs(:latest_version_href).returns(new_repo.version_href)
         plan_action(action, content_view_version, [library], :resolve_dependencies => true, :content => {:package_ids => [old_rpm.id]})
 
         pulp3_repo_map = {}
@@ -122,8 +145,21 @@ module ::Actions::Katello::ContentViewVersion
         assert_action_planned_with(action, ::Actions::Pulp3::Repository::MultiCopyUnits,
                                   pulp3_repo_map,
                                   { :debs => [], :errata => [], :rpms => [old_rpm.id] },
-                                  :dependency_solving => true)
+                                  :dependency_solving => true, :incremental_update => true, :seed_tasks => {})
         refute_action_planned(action, ::Actions::Pulp3::Repository::CopyContent)
+        refute_action_planned(action, ::Actions::Pulp3::Repository::CopyVersion)
+      end
+
+      it 'seeds a base that is older than the latest version of its Pulp repository' do
+        pulp3_cvv_setup
+        ::Katello::Repository.any_instance.stubs(:soft_copy_of_library?).returns(false)
+        ::Katello::Pulp3::Repository.any_instance.stubs(:latest_version_href).returns("/test/versions/5/")
+        plan_action(action, content_view_version, [library], :resolve_dependencies => true, :content => {:package_ids => [old_rpm.id]})
+
+        assert_action_planned_with(action, ::Actions::Pulp3::Repository::CopyVersion, library_repo, SmartProxy.pulp_primary, new_repo)
+        assert_action_planned_with(action, ::Actions::Pulp3::Repository::MultiCopyUnits) do |repo_map, _unit_map, options|
+          repo_map[[library_repo.id]][:base_version] == 1 && options[:seed_tasks].keys == [new_repo.id.to_s]
+        end
       end
     end
   end
