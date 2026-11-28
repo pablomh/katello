@@ -43,11 +43,11 @@ module Katello
       @service_class = @content_type.pulp3_service_class
       @repo = katello_repositories(:pulp3_python_1)
 
-      @gcu = Katello::GenericContentUnit.create(name: "one", pulp_id: "one-uuid", content_type: "first")
-      @gcu2 = Katello::GenericContentUnit.create(name: "two", pulp_id: "two-uuid", content_type: "second")
+      @gcu = Katello::GenericContentUnit.create(name: "one", pulp_id: "one-uuid", content_type: @content_type.label)
+      @gcu2 = Katello::GenericContentUnit.create(name: "two", pulp_id: "two-uuid", content_type: @content_type.label)
       @gcu3 = Katello::GenericContentUnit.create(name: "three", pulp_id: "three-uuid", content_type: "third")
 
-      @repo.generic_content_units = [@gcu, @gcu2]
+      @repo.generic_content_units = [@gcu, @gcu2, @gcu3]
 
       indexer = Katello::ContentUnitIndexer.new(content_type: @content_type, repository: @repo)
       tracker = Katello::ContentUnitIndexer::RepoAssociationTracker.new(@content_type, @service_class, @repo)
@@ -68,6 +68,8 @@ module Katello
       gcu_ids = Katello::GenericContentUnit.repository_association_class.where(repository_id: @repo).pluck(:generic_content_unit_id)
       refute_includes gcu_ids, @gcu.id
       assert_includes gcu_ids, @gcu2.id
+      # Another subtype is not this pass's to reconcile.
+      assert_includes gcu_ids, @gcu3.id
     end
   end
 end

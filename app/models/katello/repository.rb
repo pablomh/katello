@@ -33,13 +33,14 @@ module Katello
 
     EXPORTABLE_TYPES = [YUM_TYPE, FILE_TYPE, ANSIBLE_COLLECTION_TYPE, DOCKER_TYPE, DEB_TYPE].freeze
 
-    ALLOWED_UPDATE_FIELDS = ['version_href', 'last_indexed'].freeze
+    ALLOWED_UPDATE_FIELDS = ['version_href', 'last_indexed', 'content_index_id'].freeze
 
     define_model_callbacks :sync, :only => :after
 
     belongs_to :root, :inverse_of => :repositories, :class_name => "Katello::RootRepository"
     belongs_to :environment, :inverse_of => :repositories, :class_name => "Katello::KTEnvironment"
     belongs_to :library_instance, :class_name => "Katello::Repository", :inverse_of => :library_instances_inverse
+    belongs_to :content_index, :class_name => "Katello::ContentIndex", :inverse_of => :repositories, :optional => true
     has_many :library_instances_inverse,
              :class_name  => 'Katello::Repository',
              :dependent   => :restrict_with_exception,
@@ -1017,8 +1018,60 @@ module Katello
         type.model_class.copy_repository_associations(source_repository, self)
         repository_type.index_additional_data_proc&.call(self, source_repository)
       end
+      adopt_content_index(source_repository)
     end
 
+    # An index may only be read for the version it was built from.
+    def current_content_index
+      return if content_index_id.nil?
+
+      index = ::Katello::ContentIndex.find_by(:id => content_index_id)
+      index if index&.version_href == version_href
+    end
+
+    def drop_stale_content_index_pointer
+      update_columns(:content_index_id => nil) if content_index_id.present? && current_content_index.nil?
+    end
+
+    # Sharing one index is what makes a copy cost a single row update.
+    def adopt_content_index(source_repository)
+      drop_stale_content_index_pointer
+      source_index = source_repository.current_content_index
+      return if source_index.nil? || source_index.version_href != version_href
+
+      source_index.with_lock do
+        update_columns(:content_index_id => source_index.id)
+      end
+    end
+
+    # A repository may point at any index whose rows were written under that
+    # version's lock by a pass that ran to completion; the lock is a transaction,
+    # so an interrupted pass rolls its rows back. Per-type partial passes never publish.
+    def publish_content_index_pointer
+      return if version_href.blank?
+
+      index = ::Katello::ContentIndex.find_by(:version_href => version_href)
+      return if index.nil?
+
+      index.with_lock do
+        update_columns(:content_index_id => index.id) unless content_index_id == index.id
+      end
+    rescue ActiveRecord::RecordNotFound
+      # GC reclaimed the unshared index between the lookup and the lock; the next
+      # indexing pass rebuilds it.
+      nil
+    end
+
+    # A stale or private pointer must not be read during a reindex; a shared one stays.
+    def prepare_content_index_pointer
+      drop_stale_content_index_pointer
+      return if content_index_id.nil?
+
+      update_columns(:content_index_id => nil) if current_content_index&.private_to?(self)
+    end
+
+    # Pulp content filters selecting what changed from +previous_version_href+ to the current
+    # version, or nil when they cannot be expressed for this repository.
     def version_change_filters(previous_version_href)
       return nil if version_href.blank? || previous_version_href.blank? || previous_version_href == version_href
       if Katello::Pulp3::Repository.next_version?(previous_version_href, version_href)
@@ -1071,10 +1124,32 @@ module Katello
       if self.yum? && !self.primary?
         index_linked_repo
       elsif changes
-        index_version_changes(changes)
-      elsif source_repository && !repository_type.unique_content_per_repo
+        index_whole_version { index_version_changes(changes) }
+      elsif source_repository && !repository_type.unique_content_per_repo && source_repository.version_href == version_href
         copy_indexed_data(source_repository)
       else
+        run_content_index_passes(full_index)
+      end
+      self.update!(last_indexed: DateTime.now)
+
+      true
+    end
+
+    # Runs a pass that leaves the repository's associations describing its whole
+    # current version, then points the repository at that version's index. The lock
+    # also keeps GC from reclaiming the index between the pass and the pointer.
+    def index_whole_version
+      return yield if version_href.blank?
+
+      ::Katello::ContentIndex.for_version(version_href).with_lock do
+        prepare_content_index_pointer
+        yield
+        publish_content_index_pointer
+      end
+    end
+
+    def run_content_index_passes(full_index)
+      index_whole_version do
         repository_type.content_types_to_index.each do |type|
           Katello::Logging.time("CONTENT_INDEX", data: {type: type.model_class}) do
             Katello::ContentUnitIndexer.new(content_type: type, repository: self, optimized: !full_index).import_all
@@ -1082,9 +1157,6 @@ module Katello
         end
         repository_type.index_additional_data_proc&.call(self)
       end
-      self.update!(last_indexed: DateTime.now)
-
-      true
     end
 
     def in_content_view?(content_view)

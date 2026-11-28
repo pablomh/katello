@@ -52,6 +52,32 @@ module Katello
       assert_equal({erratum.id => 1}, ::Katello::Repository.errata_with_module_stream_counts(source_repo))
     end
 
+    def test_adopting_from_a_source_without_an_index_drops_the_stale_pointer
+      repository = katello_repositories(:fedora_17_x86_64)
+      source = katello_repositories(:fedora_17_x86_64_dev)
+      stale = ::Katello::ContentIndex.create!(:version_href => '/pulp/api/v3/repositories/rpm/rpm/old/versions/1/')
+      version_href = '/pulp/api/v3/repositories/rpm/rpm/new/versions/1/'
+      repository.update_columns(:version_href => version_href, :content_index_id => stale.id)
+      source.update_columns(:version_href => version_href, :content_index_id => nil)
+
+      repository.adopt_content_index(source)
+
+      assert_nil repository.reload.content_index_id
+    end
+
+    def test_adopting_does_not_use_an_index_for_another_version
+      repository = katello_repositories(:fedora_17_x86_64)
+      source = katello_repositories(:fedora_17_x86_64_dev)
+      stale = ::Katello::ContentIndex.create!(:version_href => '/pulp/api/v3/repositories/rpm/rpm/old/versions/1/')
+      version_href = '/pulp/api/v3/repositories/rpm/rpm/new/versions/1/'
+      repository.update_columns(:version_href => version_href, :content_index_id => nil)
+      source.update_columns(:version_href => version_href, :content_index_id => stale.id)
+
+      repository.adopt_content_index(source)
+
+      assert_nil repository.reload.content_index_id
+    end
+
     def test_fetch_package_errata_to_keep
       @fedora_17_x86_64_dev = katello_repositories(:fedora_17_x86_64_dev)
       @fedora_17_x86_64_dev.errata.destroy_all
@@ -760,31 +786,6 @@ module Katello
       assert repo_types_hash[::Katello::ModuleStream.content_type] < repo_types_hash[::Katello::Erratum.content_type]
     end
 
-    def test_in_content_view
-      view = katello_content_views(:library_view)
-      rhel7 = katello_repositories(:rhel_7_no_arch)
-      assert @fedora_17_x86_64.in_content_view?(view)
-      refute rhel7.in_content_view?(view)
-    end
-
-    def test_published_in_versions
-      view = katello_content_views(:library_view)
-      versions = @fedora_17_x86_64.published_in_versions
-      assert_equal versions.length, 3
-      version = @fedora_17_x86_64.published_in_versions.where(content_view_id: view.id).map(&:version)
-      cv_name = @fedora_17_x86_64.published_in_versions.where(content_view_id: view.id).first.content_view.name
-      assert_equal_arrays version, view.versions.map(&:version)
-      assert_equal cv_name, view.name
-    end
-
-    def test_repository_smart_proxy_syncable
-      view = katello_content_views(:library_view)
-      repo = view.versions.map(&:repositories).flatten.find { |repository| repository.yum? && !repository.environment_id.nil? }
-      assert_includes ::Katello::Repository.smart_proxy_syncable.map(&:pulp_id), repo.pulp_id
-      view.generated_for_repository_export!
-      refute_includes ::Katello::Repository.smart_proxy_syncable.map(&:pulp_id), repo.pulp_id
-    end
-
     def test_version_change_filters_use_version_ranges_for_yum
       @fedora_17_x86_64.version_href = "/cv_repo/versions/3/"
 
@@ -792,6 +793,55 @@ module Katello
 
       range = ["/library_repo/versions/7/", "/cv_repo/versions/3/"]
       assert_equal({ added: { added_between: range }, removed: { removed_between: range } }, filters)
+    end
+
+    def test_index_whole_version_publishes_the_upload_pass
+      repo = katello_repositories(:fedora_17_x86_64)
+      rpm_one = katello_rpms(:one)
+      rpm_two = katello_rpms(:two)
+      href = '/pulp/api/v3/repositories/rpm/rpm/upload/versions/2/'
+      repo.update_columns(:version_href => href, :content_index_id => nil)
+      Katello::RepositoryRpm.where(:repository_id => repo.id).delete_all
+      [rpm_one, rpm_two].each { |rpm| Katello::RepositoryRpm.create!(:repository_id => repo.id, :rpm_id => rpm.id) }
+
+      tracker = mock('tracker')
+      tracker.stubs(:unit_ids).returns([rpm_one.id, rpm_two.id])
+      tracker.stubs(:content_index_values).returns([])
+
+      repo.index_whole_version do
+        Katello::ContentUnitIndexer.new(:content_type => RepositoryTypeManager.find_content_type('rpm'),
+                                        :repository => repo).send(:sync_content_index, tracker, true)
+      end
+
+      repo.reload
+      refute_nil repo.content_index_id
+      assert_equal [rpm_one.id, rpm_two.id].sort,
+                   Katello::ContentIndexRpm.where(:content_index_id => repo.content_index_id).pluck(:rpm_id).sort
+    end
+
+    def test_index_whole_version_points_at_a_shared_index_without_touching_it
+      repo = katello_repositories(:fedora_17_x86_64)
+      other_repo = katello_repositories(:fedora_17_x86_64_dev)
+      rpm_one = katello_rpms(:one)
+      href = '/pulp/api/v3/repositories/rpm/rpm/shared/versions/2/'
+      index = Katello::ContentIndex.create!(:version_href => href)
+      Katello::ContentIndexRpm.create!(:content_index_id => index.id, :rpm_id => rpm_one.id)
+      repo.update_columns(:version_href => href, :content_index_id => nil)
+      other_repo.update_columns(:version_href => href, :content_index_id => index.id)
+      Katello::RepositoryRpm.where(:repository_id => repo.id).delete_all
+      Katello::RepositoryRpm.create!(:repository_id => repo.id, :rpm_id => rpm_one.id)
+
+      tracker = mock('tracker')
+      tracker.stubs(:unit_ids).returns([rpm_one.id])
+      tracker.stubs(:content_index_values).returns([])
+
+      repo.index_whole_version do
+        Katello::ContentUnitIndexer.new(:content_type => RepositoryTypeManager.find_content_type('rpm'),
+                                        :repository => repo).send(:sync_content_index, tracker, true)
+      end
+
+      assert_equal index.id, repo.reload.content_index_id
+      assert_equal [rpm_one.id], Katello::ContentIndexRpm.where(:content_index_id => index.id).pluck(:rpm_id)
     end
 
     def test_version_change_filters_prefer_the_successor_filter
@@ -865,6 +915,31 @@ module Katello
 
       assert_equal [two.id, three.id].sort, delta
       assert_equal full, delta
+    end
+
+    def test_in_content_view
+      view = katello_content_views(:library_view)
+      rhel7 = katello_repositories(:rhel_7_no_arch)
+      assert @fedora_17_x86_64.in_content_view?(view)
+      refute rhel7.in_content_view?(view)
+    end
+
+    def test_published_in_versions
+      view = katello_content_views(:library_view)
+      versions = @fedora_17_x86_64.published_in_versions
+      assert_equal versions.length, 3
+      version = @fedora_17_x86_64.published_in_versions.where(content_view_id: view.id).map(&:version)
+      cv_name = @fedora_17_x86_64.published_in_versions.where(content_view_id: view.id).first.content_view.name
+      assert_equal_arrays version, view.versions.map(&:version)
+      assert_equal cv_name, view.name
+    end
+
+    def test_repository_smart_proxy_syncable
+      view = katello_content_views(:library_view)
+      repo = view.versions.map(&:repositories).flatten.find { |repository| repository.yum? && !repository.environment_id.nil? }
+      assert_includes ::Katello::Repository.smart_proxy_syncable.map(&:pulp_id), repo.pulp_id
+      view.generated_for_repository_export!
+      refute_includes ::Katello::Repository.smart_proxy_syncable.map(&:pulp_id), repo.pulp_id
     end
   end
 end

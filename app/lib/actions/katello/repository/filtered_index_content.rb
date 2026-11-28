@@ -27,32 +27,31 @@ module Actions
               type.model_class.import_for_repository(repo, content_type: type.content_type)
             end
           elsif repo.deb?
-            if input[:import_upload_task] && input[:import_upload_task][:content_unit_href]
-              unit_ids = [input[:import_upload_task][:content_unit_href]]
-            elsif input[:upload_actions]&.any? { |action| action.try(:[], "content_unit_href") }
-              uploaded_content_unit_hrefs = []
-              input[:upload_actions].each { |action| uploaded_content_unit_hrefs << action.try(:[], "content_unit_href") }
-              unit_ids = uploaded_content_unit_hrefs.compact
-            else
-              unit_ids = []
-            end
-            ::Katello::Deb.import_all(unit_ids, repo, {filtered_indexing: true})
+            index_filtered_units(repo, ::Katello::Deb, uploaded_unit_ids)
           elsif repo.yum?
-            if input[:import_upload_task] && input[:import_upload_task][:content_unit_href]
-              unit_ids = [input[:import_upload_task][:content_unit_href]]
-            elsif input[:upload_actions]&.any? { |action| action.try(:[], "content_unit_href") }
-              uploaded_content_unit_hrefs = []
-              input[:upload_actions].each { |action| uploaded_content_unit_hrefs << action.try(:[], "content_unit_href") }
-              unit_ids = uploaded_content_unit_hrefs.compact
-            else
-              unit_ids = []
-            end
-            if input[:content_type] == ::Katello::Srpm::CONTENT_TYPE
-              ::Katello::Srpm.import_all(unit_ids, repo, {filtered_indexing: true})
-            else
-              ::Katello::Rpm.import_all(unit_ids, repo, {filtered_indexing: true})
-            end
+            unit_class = (input[:content_type] == ::Katello::Srpm::CONTENT_TYPE) ? ::Katello::Srpm : ::Katello::Rpm
+            index_filtered_units(repo, unit_class, uploaded_unit_ids)
           end
+        end
+
+        private
+
+        def uploaded_unit_ids
+          if input[:import_upload_task] && input[:import_upload_task][:content_unit_href]
+            [input[:import_upload_task][:content_unit_href]]
+          elsif input[:upload_actions]&.any? { |action| action.try(:[], "content_unit_href") }
+            input[:upload_actions].filter_map { |action| action.try(:[], "content_unit_href") }
+          else
+            []
+          end
+        end
+
+        # The upload only adds units; the pass leaves the index describing the whole version.
+        def index_filtered_units(repo, unit_class, unit_ids)
+          repo.index_whole_version do
+            unit_class.import_all(unit_ids, repo, :filtered_indexing => true)
+          end
+          repo.update!(:last_indexed => DateTime.now)
         end
       end
     end
