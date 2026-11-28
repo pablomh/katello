@@ -1,6 +1,7 @@
 module Actions
   module Katello
     module ContentViewVersion
+      # rubocop:disable Metrics/ClassLength
       class IncrementalUpdate < Actions::EntryAction
         include ::Katello::ContentViewHelper
         include Helpers::ContentViewAutoPublisher
@@ -63,7 +64,7 @@ module Actions
                                                             :status => ::Katello::ContentViewHistory::IN_PROGRESS, :task => self.task,
                                                             :notes => description)
 
-            copy_action_outputs = []
+            copy_outputs = []
             repos_to_clone = repos_to_copy(old_version, new_components)
 
             sequence do
@@ -78,51 +79,20 @@ module Actions
                             incremental: true)
               end
 
+              # The clones already reuse their source's version, publication and index, so only the
+              # repositories the selected units are copied into need further work.
               concurrence do
                 [:pulp3_deb_multicopy, :pulp3_yum_multicopy].each do |mapping|
-                  if separated_repo_map[mapping].keys.flatten.present?
-                    extended_repo_mapping = pulp3_repo_mapping(separated_repo_map[mapping], old_version)
-                    unit_map = pulp3_content_mapping(content)
-
-                    unless extended_repo_mapping.empty? || unit_map.values.flatten.empty?
-                      sequence do
-                        # Pre-copy content if dest_repo is a soft copy of its library instance.
-                        # Don't use extended_repo_mapping because the source repositories are library instances.
-                        # We want the old CV snapshot repositories here so as to not pull in excess new content.
-                        separated_repo_map[mapping].each do |source_repos, dest_repo|
-                          if dest_repo.soft_copy_of_library?
-                            source_repos.each do |source_repo|
-                              # remove_all flag is set to cover the case of incrementally updating more than once with different content.
-                              # Without it, content from the previous incremental update will be copied as well due to how Pulp repo versions work.
-                              plan_action(Pulp3::Repository::CopyContent, source_repo, SmartProxy.pulp_primary, dest_repo, copy_all: true, remove_all: true)
-                            end
-                          end
-                        end
-                        copy_action_outputs << plan_action(Pulp3::Repository::MultiCopyUnits, extended_repo_mapping, unit_map,
-                                                           dependency_solving: dep_solve).output
-                        repos_to_clone.each do |source_repos|
-                          if separated_repo_map[mapping].keys.include?(source_repos)
-                            copy_repos(repository_mapping[source_repos])
-                          end
-                        end
-                      end
-                    end
-                  end
-                end
-
-                if separated_repo_map[:other].keys.flatten.present?
-                  repos_to_clone.each do |source_repos|
-                    if separated_repo_map[:other].keys.include?(source_repos)
-                      copy_repos(repository_mapping[source_repos])
-                    end
-                  end
+                  next if separated_repo_map[mapping].empty?
+                  copy_output = plan_unit_copy(separated_repo_map[mapping], old_version, content, dep_solve)
+                  copy_outputs << copy_output if copy_output
                 end
               end
 
               plan_self(:content_view_id => old_version.content_view.id,
                         :new_content_view_version_id => self.new_content_view_version.id,
                         :environment_ids => environments.map(&:id), :user_id => ::User.current.id,
-                        :history_id => history.id, :copy_action_outputs => copy_action_outputs,
+                        :history_id => history.id, :copy_action_outputs => copy_outputs,
                         :old_version => old_version.id,
                         :propagated_composite_cv_ids => propagated_composite_cv_ids)
               promote(new_content_view_version, environments)
@@ -148,7 +118,49 @@ module Actions
           unit_map
         end
 
-        def pulp3_repo_mapping(repo_mapping, old_version)
+        # Copies the selected units into the clones holding them, then republishes the clones the copy
+        # changed.
+        def plan_unit_copy(repo_map, old_version, content, dep_solve)
+          unit_map = pulp3_content_mapping(content)
+          return if unit_map.values.flatten.empty?
+
+          # Dependency solving can pull units into a repository that holds none of the selected ones.
+          extended_repo_mapping = pulp3_repo_mapping(repo_map, old_version, dep_solve ? nil : unit_map)
+
+          dest_repo_ids = extended_repo_mapping.values.pluck(:dest_repo).to_set
+          copy_targets = repo_map.select { |_source_repos, dest_repo| dest_repo_ids.include?(dest_repo.id) }
+          copy_output = nil
+          seed_tasks = {}
+          sequence do
+            copy_targets.each do |source_repos, dest_repo|
+              next unless seed_base?(dest_repo)
+              seed = plan_action(Pulp3::Repository::CopyVersion, source_repos.first, SmartProxy.pulp_primary, dest_repo)
+              seed_tasks[dest_repo.id.to_s] = seed.output[:pulp_tasks]
+            end
+            unless extended_repo_mapping.empty?
+              copy_action = plan_action(Pulp3::Repository::MultiCopyUnits, extended_repo_mapping, unit_map,
+                                        dependency_solving: dep_solve, incremental_update: true,
+                                        seed_tasks: seed_tasks)
+              copy_targets.each_value do |dest_repo|
+                plan_action(Katello::Repository::MetadataGenerate, dest_repo,
+                            contents_changed: copy_action.save_versions_output[:changed_repositories][dest_repo.id.to_s])
+              end
+              copy_output = copy_action.output
+            end
+          end
+          copy_output
+        end
+
+        # The copy's version must directly follow one holding exactly the base, so its delta can be
+        # indexed without range filters. A soft copy's base lives in the library's Pulp repository,
+        # and a base older than the latest version is not what the copy's version follows.
+        def seed_base?(dest_repo)
+          return false if dest_repo.version_href.blank?
+          dest_repo.soft_copy_of_library? ||
+            dest_repo.version_href != dest_repo.backend_service(SmartProxy.pulp_primary).latest_version_href
+        end
+
+        def pulp3_repo_mapping(repo_mapping, old_version, selected_units = nil)
           pulp3_repo_mapping = {}
           repo_mapping.each do |source_repos, dest_repo|
             old_version_repo = old_version.repositories.archived.find_by(root_id: dest_repo.root_id)
@@ -156,6 +168,7 @@ module Actions
             next if old_version_repo.version_href == old_version_repo.library_instance.version_href
 
             source_library_repo = source_repos.first.library_instance? ? source_repos.first : source_repos.first.library_instance
+            next if selected_units && !holds_selected_units?(source_library_repo, selected_units)
 
             source_repos = [source_library_repo]
             if old_version_repo.version_href.nil?
@@ -171,16 +184,15 @@ module Actions
           pulp3_repo_mapping
         end
 
+        def holds_selected_units?(repository, unit_map)
+          ::Katello::RepositoryRpm.where(repository_id: repository.id, rpm_id: unit_map[:rpms]).exists? ||
+            ::Katello::RepositoryErratum.where(repository_id: repository.id, erratum_id: unit_map[:errata]).exists? ||
+            ::Katello::RepositoryDeb.where(repository_id: repository.id, deb_id: unit_map[:debs]).exists?
+        end
+
         def repos_to_copy(old_version, new_components)
           old_version.archived_repos.map do |source_repo|
             components_repo_instances(source_repo, new_components)
-          end
-        end
-
-        def copy_repos(new_repo)
-          sequence do
-            plan_action(Katello::Repository::MetadataGenerate, new_repo)
-            plan_action(Katello::Repository::IndexContent, id: new_repo.id)
           end
         end
 
@@ -245,28 +257,18 @@ module Actions
           base_repos = ::Katello::ContentViewVersion.find(input[:old_version]).repositories
           new_repos = version.repositories
 
-          if input[:is_composite] || input[:copy_action_outputs].present? && input[:copy_action_outputs].last[:pulp_tasks].present?
+          copied = input[:copy_action_outputs].present? && input[:copy_action_outputs].last[:pulp_tasks].present?
+          if input[:is_composite] || copied
             new_repos.each do |new_repo|
               matched_old_repo = base_repos.where(root_id: new_repo.root_id).first
 
-              new_errata = new_repo.errata - (matched_old_repo&.errata || [])
-              new_module_streams = new_repo.module_streams - (matched_old_repo&.module_streams || [])
-              new_rpms = new_repo.rpms - (matched_old_repo&.rpms || [])
-              new_debs = new_repo.debs - (matched_old_repo&.debs || [])
-
-              new_errata.each do |erratum|
-                content[::Katello::Erratum::CONTENT_TYPE] << erratum.errata_id
-              end
-              new_module_streams.each do |module_stream|
+              content[::Katello::Erratum::CONTENT_TYPE] += added_units(new_repo, matched_old_repo, :errata).pluck(:errata_id)
+              added_units(new_repo, matched_old_repo, :module_streams).each do |module_stream|
                 content[::Katello::ModuleStream::CONTENT_TYPE] <<
                   "#{module_stream.name}:#{module_stream.stream}:#{module_stream.version}"
               end
-              new_rpms.each do |rpm|
-                content[::Katello::Rpm::CONTENT_TYPE] << rpm.nvra
-              end
-              new_debs.each do |deb|
-                content[::Katello::Deb::CONTENT_TYPE] << deb.nva
-              end
+              content[::Katello::Rpm::CONTENT_TYPE] += added_units(new_repo, matched_old_repo, :rpms).map(&:nvra)
+              content[::Katello::Deb::CONTENT_TYPE] += added_units(new_repo, matched_old_repo, :debs).map(&:nva)
             end
           end
           output[:added_units] = content
@@ -292,6 +294,12 @@ module Actions
         end
 
         private
+
+        def added_units(new_repo, old_repo, association)
+          units = new_repo.public_send(association)
+          return units unless old_repo
+          units.where.not(id: old_repo.public_send(association).select(:id))
+        end
 
         def generate_description(version, content)
           humanized_lines = []
