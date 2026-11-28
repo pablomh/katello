@@ -521,7 +521,7 @@ module Katello
     end
   end
 
-  class RepositoryInstanceTest < RepositoryTestBase
+  class RepositoryInstanceTest < RepositoryTestBase # rubocop:disable Metrics/ClassLength
     def setup
       super
       User.current = @admin
@@ -783,6 +783,88 @@ module Katello
       assert_includes ::Katello::Repository.smart_proxy_syncable.map(&:pulp_id), repo.pulp_id
       view.generated_for_repository_export!
       refute_includes ::Katello::Repository.smart_proxy_syncable.map(&:pulp_id), repo.pulp_id
+    end
+
+    def test_version_change_filters_use_version_ranges_for_yum
+      @fedora_17_x86_64.version_href = "/cv_repo/versions/3/"
+
+      filters = @fedora_17_x86_64.version_change_filters("/library_repo/versions/7/")
+
+      range = ["/library_repo/versions/7/", "/cv_repo/versions/3/"]
+      assert_equal({ added: { added_between: range }, removed: { removed_between: range } }, filters)
+    end
+
+    def test_version_change_filters_prefer_the_successor_filter
+      @fedora_17_x86_64.version_href = "/cv_repo/versions/3/"
+
+      assert_equal({ added: { repository_version_added: "/cv_repo/versions/3/" },
+                     removed: { repository_version_removed: "/cv_repo/versions/3/" } },
+                   @fedora_17_x86_64.version_change_filters("/cv_repo/versions/2/"))
+    end
+
+    def test_version_change_filters_without_version_ranges
+      file_repo = katello_repositories(:pulp3_file_1)
+      file_repo.version_href = "/file_repo/versions/3/"
+
+      assert_equal({ added: { repository_version_added: "/file_repo/versions/3/" },
+                     removed: { repository_version_removed: "/file_repo/versions/3/" } },
+                   file_repo.version_change_filters("/file_repo/versions/2/"))
+      assert_nil file_repo.version_change_filters("/file_repo/versions/1/")
+      assert_nil file_repo.version_change_filters("/file_repo/versions/3/")
+    end
+
+    def test_index_content_changed_from_indexes_only_the_changes
+      @fedora_17_x86_64.update!(version_href: "/cv_repo/versions/3/")
+      type_count = @fedora_17_x86_64.repository_type.content_types_to_index.count
+      Katello::ContentUnitIndexer.any_instance.expects(:import_all).with(true).times(type_count).returns([])
+      Katello::ContentUnitIndexer.any_instance.expects(:remove_all).with([]).times(type_count)
+      @fedora_17_x86_64.expects(:import_distribution_data)
+
+      @fedora_17_x86_64.index_content(changed_from: "/cv_repo/versions/2/")
+    end
+
+    def test_index_content_changed_from_falls_back_to_full_index
+      file_repo = katello_repositories(:pulp3_file_1)
+      file_repo.update!(version_href: "/file_repo/versions/3/")
+      Katello::ContentUnitIndexer.any_instance.expects(:import_all).with.at_least_once
+      Katello::ContentUnitIndexer.any_instance.expects(:remove_all).never
+
+      file_repo.index_content(changed_from: "/file_repo/versions/1/")
+    end
+
+    def stub_rpm_listing(version_filter_matcher, rpms)
+      Katello::Pulp3::Rpm.stubs(:pulp_units_batch_for_repo).with(anything, version_filter_matcher).
+        returns([rpms.map { |rpm| { 'pulp_href' => rpm.pulp_id } }])
+    end
+
+    def test_delta_index_with_pruned_packages_matches_a_full_index
+      one = katello_rpms(:one)
+      two = katello_rpms(:two)
+      three = katello_rpms(:three)
+      [Katello::Pulp3::ModuleStream, Katello::Pulp3::Erratum, Katello::Pulp3::PackageGroup, Katello::Pulp3::Srpm].each do |service|
+        service.stubs(:pulp_units_batch_for_repo).returns([])
+      end
+      Katello::ContentUnitIndexer.any_instance.stubs(:fetch_only_ids).returns(true)
+      @fedora_17_x86_64.stubs(:import_distribution_data)
+      @fedora_17_x86_64.update!(version_href: "/pulp/api/v3/repositories/rpm/rpm/cv/versions/4/")
+      previous_version_href = "/pulp/api/v3/repositories/rpm/rpm/cv/versions/3/"
+      # Version 4 adds three and its retention policy prunes one.
+      stub_rpm_listing(has_entry(:version_filter, { repository_version_added: @fedora_17_x86_64.version_href }), [three])
+      stub_rpm_listing(has_entry(:version_filter, { repository_version_removed: @fedora_17_x86_64.version_href }), [one])
+      stub_rpm_listing(Not(has_key(:version_filter)), [two, three])
+
+      indexed_rpm_ids = lambda do |index_options|
+        Katello::RepositoryRpm.where(repository_id: @fedora_17_x86_64.id).delete_all
+        [one, two].each { |rpm| Katello::RepositoryRpm.create!(repository_id: @fedora_17_x86_64.id, rpm_id: rpm.id) }
+        @fedora_17_x86_64.index_content(index_options)
+        Katello::RepositoryRpm.where(repository_id: @fedora_17_x86_64.id).pluck(:rpm_id).sort
+      end
+
+      delta = indexed_rpm_ids.call(changed_from: previous_version_href)
+      full = indexed_rpm_ids.call({})
+
+      assert_equal [two.id, three.id].sort, delta
+      assert_equal full, delta
     end
   end
 end

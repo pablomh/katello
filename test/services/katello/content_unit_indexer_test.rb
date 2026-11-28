@@ -3,6 +3,23 @@ require 'katello_test_helper'
 module Katello
   class ContentUnitIndexerTest < ActiveSupport::TestCase
     # rubocop:disable Metrics/AbcSize
+    def test_remove_all_drops_listed_units_except_kept
+      repo = katello_repositories(:fedora_17_x86_64)
+      rpm_one = katello_rpms(:one)
+      rpm_two = katello_rpms(:two)
+      filter = { removed_between: ["/a/versions/1/", "/b/versions/2/"] }
+      Katello::Pulp3::Rpm.expects(:pulp_units_batch_for_repo).
+        with(repo, has_entry(:version_filter, filter)).
+        returns([[{ 'pulp_href' => rpm_one.pulp_id }, { 'pulp_href' => rpm_two.pulp_id }]])
+      content_type = Katello::RepositoryTypeManager.find_content_type('rpm')
+
+      Katello::ContentUnitIndexer.new(content_type: content_type, repository: repo, version_filter: filter).remove_all([rpm_two.id])
+
+      refute Katello::RepositoryRpm.where(repository_id: repo.id, rpm_id: rpm_one.id).exists?
+      assert Katello::RepositoryRpm.where(repository_id: repo.id, rpm_id: rpm_two.id).exists?
+    end
+
+    # rubocop:disable Metrics/AbcSize
     def test_clean_duplicate_docker_tags
       @repo = katello_repositories(:fedora_17_x86_64_dev)
       content_type = Katello::RepositoryTypeManager.find_content_type('docker_tag')
