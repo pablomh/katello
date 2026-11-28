@@ -1019,6 +1019,36 @@ module Katello
       end
     end
 
+    def version_change_filters(previous_version_href)
+      return nil if version_href.blank? || previous_version_href.blank? || previous_version_href == version_href
+      if Katello::Pulp3::Repository.next_version?(previous_version_href, version_href)
+        { added: { repository_version_added: version_href }, removed: { repository_version_removed: version_href } }
+      elsif version_range_filters_supported?
+        range = [previous_version_href, version_href]
+        { added: { added_between: range }, removed: { removed_between: range } }
+      end
+    end
+
+    def version_range_filters_supported?
+      repository_type.content_types_to_index.all? do |type|
+        SmartProxy.pulp_primary!.content_service(type).supports_version_range_filters?
+      end
+    end
+
+    # Additions go first: a unit replaced under the same identifier (an advisory republished
+    # with a new href) appears in both sets and must keep its association.
+    def index_version_changes(changes)
+      repository_type.content_types_to_index.each do |type|
+        Katello::Logging.time("CONTENT_INDEX", data: {type: type.model_class, delta: true}) do
+          added_unit_ids = Katello::ContentUnitIndexer.new(content_type: type, repository: self,
+                                                           version_filter: changes[:added]).import_all(true)
+          Katello::ContentUnitIndexer.new(content_type: type, repository: self,
+                                          version_filter: changes[:removed]).remove_all(added_unit_ids)
+        end
+      end
+      repository_type.index_additional_data_proc&.call(self)
+    end
+
     def index_linked_repo
       if (base_repo = self.target_repository)
         copy_indexed_data(base_repo)
@@ -1037,8 +1067,11 @@ module Katello
 
       full_index = options.fetch(:full_index, false)
       source_repository = options.fetch(:source_repository, nil)
+      changes = options[:changed_from] && version_change_filters(options[:changed_from])
       if self.yum? && !self.primary?
         index_linked_repo
+      elsif changes
+        index_version_changes(changes)
       elsif source_repository && !repository_type.unique_content_per_repo
         copy_indexed_data(source_repository)
       else

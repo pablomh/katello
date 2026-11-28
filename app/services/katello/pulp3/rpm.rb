@@ -2,6 +2,8 @@ module Katello
   module Pulp3
     class Rpm < PulpContentUnit
       include LazyAccessor
+      include YumContentUnit
+
       CONTENT_TYPE = "rpm".freeze
       PULPCORE_CONTENT_TYPE = "rpm.package".freeze
 

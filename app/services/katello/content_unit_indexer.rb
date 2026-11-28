@@ -1,6 +1,6 @@
 module Katello
   class ContentUnitIndexer
-    def initialize(content_type:, repository: nil, pulp_content_ids: nil, optimized: true)
+    def initialize(content_type:, repository: nil, pulp_content_ids: nil, optimized: true, version_filter: nil)
       @content_type = content_type
       @model_class = content_type.model_class
       @service_class = SmartProxy.pulp_primary!.content_service(content_type)
@@ -8,6 +8,7 @@ module Katello
       @content_type = content_type
       @pulp_content_ids = pulp_content_ids
       @optimized = optimized
+      @version_filter = version_filter
     end
 
     def remove_duplicates(unit)
@@ -52,9 +53,22 @@ module Katello
         import_associations(units) if @repository
       end
 
-      if @repository
-        sync_repository_associations(association_tracker, additive: filtered_indexing)
+      return [] unless @repository
+      sync_repository_associations(association_tracker, additive: filtered_indexing)
+      association_tracker.unit_ids
+    end
+
+    def remove_all(kept_unit_ids = [])
+      removed_unit_ids = []
+      units_from_pulp.each do |units|
+        pulp_ids = units.map { |unit| unit[@service_class.unit_identifier] }
+        unit_ids = self.class.pulp_id_to_id_map(@content_type, pulp_ids).values - kept_unit_ids
+        next if unit_ids.empty?
+        @model_class.repository_association_class.where(repository_id: @repository.id,
+                                                        @model_class.unit_id_field => unit_ids).destroy_all
+        removed_unit_ids.concat(unit_ids)
       end
+      removed_unit_ids
     end
 
     def reimport_units
@@ -75,7 +89,9 @@ module Katello
       if @pulp_content_ids
         @service_class.pulp_units_batch_all(@pulp_content_ids, &block)
       elsif @repository
-        @service_class.pulp_units_batch_for_repo(@repository, fetch_identifiers: fetch_only_ids, content_type: @content_type, &block)
+        options = { fetch_identifiers: fetch_only_ids, content_type: @content_type }
+        options[:version_filter] = @version_filter if @version_filter
+        @service_class.pulp_units_batch_for_repo(@repository, options, &block)
       end
     end
 

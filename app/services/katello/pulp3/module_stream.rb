@@ -2,6 +2,8 @@ module Katello
   module Pulp3
     class ModuleStream < PulpContentUnit
       include LazyAccessor
+      include YumContentUnit
+
       PULPCORE_CONTENT_TYPE = "rpm.modulemd".freeze
 
       def self.content_api

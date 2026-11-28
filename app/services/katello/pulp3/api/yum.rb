@@ -4,6 +4,11 @@ module Katello
   module Pulp3
     module Api
       class Yum < Core
+        # pulp_rpm_client 3.39.0 accepts added_between/removed_between but does not send them.
+        def self.version_range_filters?
+          Gem::Version.new(PulpRpmClient::VERSION) >= Gem::Version.new('3.39.1')
+        end
+
         def self.remote_uln_class
           PulpRpmClient::RpmUlnRemote
         end
