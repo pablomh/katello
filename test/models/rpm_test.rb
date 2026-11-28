@@ -49,6 +49,14 @@ module Katello
       assert_equal Rpm.in_repositories([@repo, repo2]).to_a.sort, [@rpm_one, @rpm_two].sort
     end
 
+    def test_with_identifiers_does_not_modify_the_argument
+      ids = [@rpm_one.id.to_s]
+
+      Rpm.with_identifiers(ids)
+
+      assert_equal [@rpm_one.id.to_s], ids
+    end
+
     def test_search_version_greater_than_or_equal
       rpms = Rpm.in_repositories(@repo).non_modular.search_for('version >= 1.0')
       expected = [@rpm_one, @rpm_one_i686, @rpm_one_i686_two, @rpm_one_two, @rpm_three, @rpm_two,
