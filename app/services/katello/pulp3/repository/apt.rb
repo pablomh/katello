@@ -144,63 +144,6 @@ module Katello
           tasks.flatten
         end
 
-        def copy_api_data_dup(data)
-          data_dup = PulpDebClient::Copy.new
-          data_dup.dependency_solving = data.dependency_solving
-          data_dup.config = []
-          data.config.each do |repo_config|
-            config_hash = {
-              source_repo_version: repo_config[:source_repo_version],
-              dest_repo: repo_config[:dest_repo],
-              content: [],
-            }
-            config_hash[:dest_base_version] = repo_config[:dest_base_version] if repo_config[:dest_base_version]
-            data_dup.config << config_hash
-          end
-          data_dup
-        end
-
-        def copy_content_chunked(data)
-          tasks = []
-          # Don't chunk if there aren't enough content units
-          if data.config.sum { |repo_config| repo_config[:content].size } <= UNIT_LIMIT
-            return api.copy_api.copy_content(data)
-          end
-
-          unit_copy_counter = 0
-          i = 0
-          leftover_units = data.config.first[:content].deep_dup
-
-          # Copy data and clear its content fields
-          data_dup = copy_api_data_dup(data)
-
-          while i < data_dup.config.size
-            # Copy all units within repo or only some?
-            if leftover_units.length < UNIT_LIMIT - unit_copy_counter
-              copy_amount = leftover_units.length
-            else
-              copy_amount = UNIT_LIMIT - unit_copy_counter
-            end
-
-            data_dup.config[i][:content] = leftover_units.pop(copy_amount)
-            unit_copy_counter += copy_amount
-            if unit_copy_counter != 0
-              tasks << api.copy_api.copy_content(data_dup)
-              unit_copy_counter = 0
-            end
-
-            if leftover_units.empty?
-              # Nothing more to copy -- clear current config's content
-              data_dup.config[i][:content] = []
-              i += 1
-              # Fetch unit list for next data config
-              leftover_units = data.config[i][:content].deep_dup unless i == data_dup.config.size
-            end
-          end
-
-          tasks
-        end
-
         def remove_all_content_from_mapping(repo_id_map)
           tasks = []
           repo_id_map.each do |_source_repo_ids, dest_repo_id_map|
